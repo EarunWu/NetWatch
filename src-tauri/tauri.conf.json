@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "链路哨兵",
+  "version": "0.3.0",
+  "identifier": "com.netwatch.desktop",
+  "mainBinaryName": "NetWatch",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run prepare:desktop",
+    "devUrl": "http://127.0.0.1:3000",
+    "frontendDist": "../dist/client"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "链路哨兵",
+        "width": 1380,
+        "height": 900,
+        "minWidth": 980,
+        "minHeight": 680,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false,
+        "useHttpsScheme": false
+      }
+    ],
+    "security": {
+      "capabilities": ["main-capability"],
+      "csp": "default-src 'self'; base-uri 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:9288; font-src 'self' data:; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "category": "Utility",
+    "shortDescription": "本地 TCP 与代理节点连接质量监控工具",
+    "externalBin": ["binaries/NetWatch.Service"]
+  }
+}

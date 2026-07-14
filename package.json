@@ -1,0 +1,45 @@
+{
+  "name": "netwatch",
+  "version": "0.3.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 3000 --strictPort",
+    "build": "npm run desktop:build",
+    "build:frontend": "vite build",
+    "build:web": "npm run build:frontend",
+    "build:sidecar": "node build/sidecar.mjs",
+    "prepare:desktop": "node build/prepare-desktop.mjs",
+    "build:legacy": "node build/release.mjs",
+    "desktop:dev": "npm run build:sidecar && tauri dev",
+    "desktop:build": "tauri build",
+    "sync:web": "node build/sync-static.mjs",
+    "start": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
+    "test": "npm run test:unit && npm run typecheck && npm run lint",
+    "test:unit": "node --test app/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.4",
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "eslint": "9.39.4",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.3",
+    "globals": "16.5.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.59.3",
+    "vite": "8.1.4"
+  },
+  "type": "module"
+}

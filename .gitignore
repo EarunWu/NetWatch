@@ -1,0 +1,49 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# build output
+/dist/
+/outputs/
+/src-tauri/binaries/*
+!/src-tauri/binaries/.gitkeep
+/src-tauri/target/
+*.tsbuildinfo
+
+# misc
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# local runtime data
+targets.json
+targets-*.tmp
+netwatch.log
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# temporary work
+/work/
