@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "链路哨兵",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "identifier": "com.netwatch.desktop",
   "mainBinaryName": "NetWatch",
   "build": {

@@ -21,7 +21,7 @@ import (
 const listenAddress = "127.0.0.1:9288"
 
 const (
-	serviceVersion  = "0.3.0"
+	serviceVersion  = "0.4.0"
 	serviceProtocol = "netwatch-api-v1"
 )
 
