@@ -53,6 +53,7 @@ const (
 	chartStatusHTTPError
 	chartStatusUnexpectedHTTP
 	chartStatusPacketLoss
+	chartStatusTUNBypassError
 	chartStatusOther
 )
 
@@ -422,6 +423,8 @@ func encodeChartStatus(status string) byte {
 		return chartStatusUnexpectedHTTP
 	case StatusPacketLoss:
 		return chartStatusPacketLoss
+	case StatusTUNBypassError:
+		return chartStatusTUNBypassError
 	case StatusOther:
 		return chartStatusOther
 	default:
@@ -461,6 +464,8 @@ func decodeChartStatus(status byte) string {
 		return StatusUnexpectedHTTP
 	case chartStatusPacketLoss:
 		return StatusPacketLoss
+	case chartStatusTUNBypassError:
+		return StatusTUNBypassError
 	case chartStatusOther:
 		return StatusOther
 	default:

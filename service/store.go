@@ -10,7 +10,7 @@ import (
 )
 
 const maxConfigBytes = 1024 * 1024
-const currentConfigVersion = 3
+const currentConfigVersion = 4
 
 type persistedConfig struct {
 	Version int      `json:"version"`
@@ -18,7 +18,8 @@ type persistedConfig struct {
 }
 
 type ConfigStore struct {
-	path string
+	path          string
+	loadedVersion int
 }
 
 func NewConfigStore(dataDir string) *ConfigStore {
@@ -29,6 +30,7 @@ func NewConfigStore(dataDir string) *ConfigStore {
 func (s *ConfigStore) Load() (targets []Target, exists bool, err error) {
 	file, err := os.Open(s.path)
 	if errors.Is(err, os.ErrNotExist) {
+		s.loadedVersion = 0
 		return nil, false, nil
 	}
 	if err != nil {
@@ -45,13 +47,18 @@ func (s *ConfigStore) Load() (targets []Target, exists bool, err error) {
 	if err := ensureJSONEOF(decoder); err != nil {
 		return nil, true, fmt.Errorf("decode config: %w", err)
 	}
-	if config.Version != 1 && config.Version != 2 && config.Version != currentConfigVersion {
+	if config.Version != 1 && config.Version != 2 && config.Version != 3 && config.Version != currentConfigVersion {
 		return nil, true, fmt.Errorf("unsupported config version %d", config.Version)
 	}
+	s.loadedVersion = config.Version
 	if config.Targets == nil {
 		config.Targets = []Target{}
 	}
 	return config.Targets, true, nil
+}
+
+func (s *ConfigStore) NeedsMigration() bool {
+	return s.loadedVersion > 0 && s.loadedVersion < currentConfigVersion
 }
 
 func (s *ConfigStore) Save(targets []Target) error {
@@ -93,5 +100,6 @@ func (s *ConfigStore) Save(targets []Target) error {
 		_ = os.Remove(temporaryName)
 		return fmt.Errorf("replace config: %w", err)
 	}
+	s.loadedVersion = currentConfigVersion
 	return nil
 }

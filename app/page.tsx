@@ -24,9 +24,19 @@ type Target = {
   proxy_host: string;
   proxy_port: number;
   google_204_enabled: boolean;
+  bypass_tun: boolean;
+  bypass_interface_id: string;
   interval_ms: number;
   timeout_ms: number;
   enabled: boolean;
+};
+
+type NetworkInterfaceInfo = {
+  id: string;
+  name: string;
+  addresses: string[];
+  families: string[];
+  is_default: boolean;
 };
 
 type Sample = {
@@ -143,6 +153,8 @@ type TargetFormValues = {
   proxy_host: string;
   proxy_port: string;
   google_204_enabled: boolean;
+  bypass_tun: boolean;
+  bypass_interface_id: string;
   interval_ms: string;
   timeout_ms: string;
   enabled: boolean;
@@ -215,6 +227,8 @@ const DEFAULT_FORM: TargetFormValues = {
   proxy_host: "127.0.0.1",
   proxy_port: "10808",
   google_204_enabled: false,
+  bypass_tun: true,
+  bypass_interface_id: "",
   interval_ms: "2000",
   timeout_ms: "1500",
   enabled: true,
@@ -439,6 +453,11 @@ function normalizeTarget(value: unknown, index = 0): Target | null {
       record.google_204_enabled ?? record.google204Enabled,
       false,
     ),
+    bypass_tun: readBoolean(record.bypass_tun ?? record.bypassTun, false),
+    bypass_interface_id: readString(
+      record.bypass_interface_id,
+      record.bypassInterfaceId,
+    ).trim(),
     interval_ms: Math.max(
       250,
       readNumber(record.interval_ms, record.interval, record.intervalMs) ?? 2000,
@@ -452,6 +471,32 @@ function normalizeTarget(value: unknown, index = 0): Target | null {
       true,
     ),
   };
+}
+
+function normalizeNetworkInterfaces(value: unknown): NetworkInterfaceInfo[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => {
+      const record = asRecord(entry);
+      if (!record) return null;
+      const id = readString(record.id).trim();
+      if (!id) return null;
+      const strings = (candidate: unknown) =>
+        Array.isArray(candidate)
+          ? candidate
+              .filter((item): item is string => typeof item === "string")
+              .map((item) => item.trim())
+              .filter(Boolean)
+          : [];
+      return {
+        id,
+        name: readString(record.name, id).trim() || id,
+        addresses: strings(record.addresses),
+        families: strings(record.families),
+        is_default: readBoolean(record.is_default, false),
+      } satisfies NetworkInterfaceInfo;
+    })
+    .filter((entry): entry is NetworkInterfaceInfo => entry !== null);
 }
 
 function normalizeSample(value: unknown, fallbackTargetId = ""): Sample | null {
@@ -955,6 +1000,14 @@ function getTargetState(
       kind: "error",
     };
   }
+  if (latest.status === "tun_bypass_error") {
+    return {
+      tone: "danger",
+      label: "绕过 TUN 失败",
+      detail: latest.message || "无法将探测 Socket 绑定到可用物理网卡",
+      kind: "error",
+    };
+  }
   if (latest.status.startsWith("local_proxy_")) {
     return {
       tone: "danger",
@@ -1230,6 +1283,7 @@ function lossStatusLabel(status: string, lossReason: string): string {
   }
 
   if (status === "packet_loss") return "丢失";
+  if (status === "tun_bypass_error") return "绕过 TUN 失败";
   if (status.includes("certificate")) return "证书错误";
   if (status.includes("auth")) return "认证失败";
   if (status.includes("protocol")) return "协议错误";
@@ -1308,13 +1362,19 @@ function TargetModal({
   target,
   saving,
   error,
+  networkInterfaces,
+  networkInterfacesError,
   onClose,
+  onRefreshInterfaces,
   onSubmit,
 }: {
   target: Target | null;
   saving: boolean;
   error: string;
+  networkInterfaces: NetworkInterfaceInfo[];
+  networkInterfacesError: string;
   onClose: () => void;
+  onRefreshInterfaces: () => void;
   onSubmit: (values: TargetFormValues) => Promise<void>;
 }) {
   const [values, setValues] = useState<TargetFormValues>(() =>
@@ -1327,6 +1387,8 @@ function TargetModal({
           proxy_host: target.proxy_host || "127.0.0.1",
           proxy_port: String(target.proxy_port || 10808),
           google_204_enabled: target.google_204_enabled,
+          bypass_tun: target.bypass_tun,
+          bypass_interface_id: target.bypass_interface_id,
           interval_ms: String(target.interval_ms),
           timeout_ms: String(target.timeout_ms),
           enabled: target.enabled,
@@ -1411,6 +1473,9 @@ function TargetModal({
           : "",
       proxy_port:
         values.kind === "proxy_google" ? values.proxy_port : "0",
+      bypass_tun: values.kind === "direct_tcp" && values.bypass_tun,
+      bypass_interface_id:
+        values.kind === "direct_tcp" ? values.bypass_interface_id : "",
     });
   };
 
@@ -1462,6 +1527,12 @@ function TargetModal({
                     previous.kind === "proxy_google" ? "2000" : previous.interval_ms,
                   timeout_ms:
                     previous.kind === "proxy_google" ? "1500" : previous.timeout_ms,
+                  bypass_tun:
+                    previous.kind === "proxy_google"
+                      ? target?.kind === "direct_tcp"
+                        ? target.bypass_tun
+                        : true
+                      : previous.bypass_tun,
                 }))
               }
             >
@@ -1525,6 +1596,65 @@ function TargetModal({
                     onChange={(event) => update("port", event.target.value)}
                   />
                 </label>
+                <label className="enable-row tun-bypass-option field-wide">
+                  <span>
+                    <strong>绕过 TUN</strong>
+                    <small>将 TCP Socket 绑定到物理网卡，避免 TUN 提前确认连接</small>
+                  </span>
+                  <input
+                    className="switch-input"
+                    type="checkbox"
+                    checked={values.bypass_tun}
+                    onChange={(event) => update("bypass_tun", event.target.checked)}
+                  />
+                  <span className="switch-track" aria-hidden="true" />
+                </label>
+                {values.bypass_tun && (
+                  <>
+                    <label className="field field-wide">
+                      <span>物理出口网卡</span>
+                      <select
+                        value={values.bypass_interface_id}
+                        onChange={(event) =>
+                          update("bypass_interface_id", event.target.value)
+                        }
+                      >
+                        <option value="">自动选择默认物理网卡</option>
+                        {values.bypass_interface_id &&
+                          !networkInterfaces.some(
+                            (item) => item.id === values.bypass_interface_id,
+                          ) && (
+                            <option value={values.bypass_interface_id}>
+                              当前指定网卡（已断开或不可用）
+                            </option>
+                          )}
+                        {networkInterfaces.map((item) => (
+                          <option value={item.id} key={item.id}>
+                            {item.name}
+                            {item.is_default ? "（默认出口）" : ""}
+                            {item.addresses[0] ? ` · ${item.addresses[0]}` : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="tun-bypass-note field-wide">
+                      <span>
+                        {networkInterfacesError
+                          ? networkInterfacesError
+                          : networkInterfaces.length === 0
+                            ? "未发现可用物理网卡"
+                            : "自动模式优先选择带默认网关且路由成本最低的物理网卡"}
+                      </span>
+                      <button type="button" onClick={onRefreshInterfaces}>
+                        刷新网卡
+                      </button>
+                      <small>
+                        域名仍由系统 DNS 解析；若代理使用 FakeIP，请直接填写真实 IP。
+                        绑定失败会明确报错，不会回退到 TUN。
+                      </small>
+                    </div>
+                  </>
+                )}
               </>
             ) : (
               <>
@@ -2182,12 +2312,22 @@ function CanvasChart({
   );
 }
 
-function targetEndpointText(target: Target): string {
-  return target.kind === "proxy_google"
-    ? `SOCKS ${target.proxy_host}:${target.proxy_port} → Google TLS${
-        target.google_204_enabled ? " + 204" : ""
-      }`
-    : `${target.host}:${target.port}`;
+function targetEndpointText(
+  target: Target,
+  networkInterfaces: NetworkInterfaceInfo[] = [],
+): string {
+  if (target.kind === "proxy_google") {
+    return `SOCKS ${target.proxy_host}:${target.proxy_port} → Google TLS${
+      target.google_204_enabled ? " + 204" : ""
+    }`;
+  }
+  const endpoint = `${target.host}:${target.port}`;
+  if (!target.bypass_tun) return endpoint;
+  if (!target.bypass_interface_id) return `${endpoint} · 物理直连（自动）`;
+  const selected = networkInterfaces.find(
+    (item) => item.id === target.bypass_interface_id,
+  );
+  return `${endpoint} · 物理直连（${selected?.name ?? "指定网卡"}）`;
 }
 
 function MetricTile({
@@ -2292,6 +2432,7 @@ function TargetActionMenu({
 
 function DesktopSidebar({
   targets,
+  networkInterfaces,
   statsByTarget,
   statesByTarget,
   selectedTargetId,
@@ -2304,6 +2445,7 @@ function DesktopSidebar({
   onToggleChart,
 }: {
   targets: Target[];
+  networkInterfaces: NetworkInterfaceInfo[];
   statsByTarget: Record<string, TargetStats>;
   statesByTarget: Record<string, TargetState>;
   selectedTargetId: string | null;
@@ -2406,7 +2548,7 @@ function DesktopSidebar({
                       />
                       <span>
                         <strong>{target.name}</strong>
-                        <small>{targetEndpointText(target)}</small>
+                        <small>{targetEndpointText(target, networkInterfaces)}</small>
                       </span>
                       <b>
                         {state.kind === "success"
@@ -2457,6 +2599,10 @@ export default function Home() {
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [initialLoading, setInitialLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [networkInterfaces, setNetworkInterfaces] = useState<
+    NetworkInterfaceInfo[]
+  >([]);
+  const [networkInterfacesError, setNetworkInterfacesError] = useState("");
   const [rangeMs, setRangeMs] = useState(
     () => loadViewPreferences().rangeMs,
   );
@@ -2506,6 +2652,18 @@ export default function Home() {
       }
     } catch {
       // The EventSource error path already reports connectivity failures.
+    }
+  }, []);
+
+  const loadNetworkInterfaces = useCallback(async () => {
+    try {
+      const payload = await apiRequest("/api/network-interfaces");
+      setNetworkInterfaces(normalizeNetworkInterfaces(payload));
+      setNetworkInterfacesError("");
+    } catch (error) {
+      setNetworkInterfacesError(
+        error instanceof Error ? error.message : "无法读取物理网卡列表",
+      );
     }
   }, []);
 
@@ -2617,6 +2775,14 @@ export default function Home() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, [refreshSnapshot]);
+
+  useEffect(() => {
+    if (connection !== "live") return;
+    const timer = window.setTimeout(() => {
+      void loadNetworkInterfaces();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [connection, loadNetworkInterfaces]);
 
   useEffect(() => {
     if (!pageVisible) return;
@@ -2875,6 +3041,9 @@ export default function Home() {
         values.kind === "proxy_google" ? Number(values.proxy_port) : 0,
       google_204_enabled:
         values.kind === "proxy_google" && values.google_204_enabled,
+      bypass_tun: values.kind === "direct_tcp" && values.bypass_tun,
+      bypass_interface_id:
+        values.kind === "direct_tcp" ? values.bypass_interface_id : "",
       interval_ms: Number(values.interval_ms),
       timeout_ms: Number(values.timeout_ms),
       enabled: values.enabled,
@@ -2946,6 +3115,8 @@ export default function Home() {
           proxy_host: next.proxy_host,
           proxy_port: next.proxy_port,
           google_204_enabled: next.google_204_enabled,
+          bypass_tun: next.bypass_tun,
+          bypass_interface_id: next.bypass_interface_id,
           interval_ms: next.interval_ms,
           timeout_ms: next.timeout_ms,
           enabled: next.enabled,
@@ -3019,6 +3190,7 @@ export default function Home() {
     <div className="desktop-app">
       <DesktopSidebar
         targets={displayTargets}
+        networkInterfaces={networkInterfaces}
         statsByTarget={derivedStatsByTarget}
         statesByTarget={targetStates}
         selectedTargetId={selectedTarget?.id ?? null}
@@ -3056,7 +3228,7 @@ export default function Home() {
             </div>
             <p>
               {selectedTarget
-                ? targetEndpointText(selectedTarget)
+                ? targetEndpointText(selectedTarget, networkInterfaces)
                 : "比较全部 TCP 与代理节点的实时连接质量"}
             </p>
           </div>
@@ -3309,7 +3481,7 @@ export default function Home() {
                         {selectedState.label}
                       </span>
                     </div>
-                    <p>{targetEndpointText(selectedTarget)}</p>
+                    <p>{targetEndpointText(selectedTarget, networkInterfaces)}</p>
                     <small>
                       {selectedLatest
                         ? "最近探测 " +
@@ -3505,7 +3677,7 @@ export default function Home() {
                           />
                           <span>
                             <strong>{target.name}</strong>
-                            <small>{targetEndpointText(target)}</small>
+                            <small>{targetEndpointText(target, networkInterfaces)}</small>
                           </span>
                         </button>
                         <span className={"status-badge tone-" + state.tone}>
@@ -3578,10 +3750,13 @@ export default function Home() {
           target={formTarget}
           saving={saving}
           error={modalError}
+          networkInterfaces={networkInterfaces}
+          networkInterfacesError={networkInterfacesError}
           onClose={() => {
             setFormTarget(undefined);
             setModalError("");
           }}
+          onRefreshInterfaces={() => void loadNetworkInterfaces()}
           onSubmit={saveTarget}
         />
       )}

@@ -33,12 +33,13 @@ const (
 )
 
 type APIServer struct {
-	monitor       *Monitor
-	hub           *eventHub
-	startedAt     time.Time
-	web           fs.FS
-	listenAddress string
-	instanceID    string
+	monitor        *Monitor
+	hub            *eventHub
+	startedAt      time.Time
+	web            fs.FS
+	listenAddress  string
+	instanceID     string
+	listInterfaces func() ([]NetworkInterfaceInfo, error)
 }
 
 func NewAPIServer(monitor *Monitor, hub *eventHub) (*APIServer, error) {
@@ -59,12 +60,13 @@ func NewAPIServerAt(monitor *Monitor, hub *eventHub, address string) (*APIServer
 
 func newAPIServer(monitor *Monitor, hub *eventHub, web fs.FS, address, instanceID string, startedAt time.Time) *APIServer {
 	return &APIServer{
-		monitor:       monitor,
-		hub:           hub,
-		startedAt:     startedAt,
-		web:           web,
-		listenAddress: address,
-		instanceID:    instanceID,
+		monitor:        monitor,
+		hub:            hub,
+		startedAt:      startedAt,
+		web:            web,
+		listenAddress:  address,
+		instanceID:     instanceID,
+		listInterfaces: listPhysicalNetworkInterfaces,
 	}
 }
 
@@ -80,6 +82,7 @@ func (s *APIServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/targets", s.listTargets)
+	mux.HandleFunc("GET /api/network-interfaces", s.networkInterfaces)
 	mux.HandleFunc("POST /api/targets", s.createTarget)
 	mux.HandleFunc("PUT /api/targets/{id}", s.updateTarget)
 	mux.HandleFunc("DELETE /api/targets/{id}", s.deleteTarget)
@@ -120,6 +123,15 @@ func (s *APIServer) health(writer http.ResponseWriter, _ *http.Request) {
 
 func (s *APIServer) listTargets(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, s.monitor.ListTargets())
+}
+
+func (s *APIServer) networkInterfaces(writer http.ResponseWriter, _ *http.Request) {
+	interfaces, err := s.listInterfaces()
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "interface_discovery_failed", err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, interfaces)
 }
 
 func (s *APIServer) createTarget(writer http.ResponseWriter, request *http.Request) {

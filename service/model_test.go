@@ -50,7 +50,8 @@ func TestNormalizeProxyGoogleTarget(t *testing.T) {
 		Host: "ignored.example", Port: 80,
 		ProxyHost: "127.0.0.1", ProxyPort: 10808,
 		Google204Enabled: true,
-		IntervalMS:       5000, TimeoutMS: 8000, Enabled: true,
+		BypassTUN:        true, BypassInterfaceID: "physical-adapter",
+		IntervalMS: 5000, TimeoutMS: 8000, Enabled: true,
 	}
 	normalized, err := normalizeAndValidateTarget(target)
 	if err != nil {
@@ -58,6 +59,9 @@ func TestNormalizeProxyGoogleTarget(t *testing.T) {
 	}
 	if normalized.Host != GoogleProbeHost || normalized.Port != GoogleProbePort || normalized.Name != "Node" || !normalized.Google204Enabled {
 		t.Fatalf("Google endpoint was not normalized: %#v", normalized)
+	}
+	if normalized.BypassTUN || normalized.BypassInterfaceID != "" {
+		t.Fatalf("node target retained direct-only bypass settings: %#v", normalized)
 	}
 	tlsOnly := normalized
 	tlsOnly.Google204Enabled = false
@@ -74,6 +78,20 @@ func TestNormalizeProxyGoogleTarget(t *testing.T) {
 	invalid.IntervalMS = minNodeIntervalMS - 1
 	if _, err := normalizeAndValidateTarget(invalid); err == nil {
 		t.Fatal("overly frequent Google probe was accepted")
+	}
+}
+
+func TestBypassSettingsArePartOfProbeIdentity(t *testing.T) {
+	base := Target{Kind: ProbeKindDirectTCP, Host: "example.com", Port: 443}
+	withBypass := base
+	withBypass.BypassTUN = true
+	if sameProbeIdentity(base, withBypass) {
+		t.Fatal("changing bypass mode did not reset probe identity")
+	}
+	withInterface := withBypass
+	withInterface.BypassInterfaceID = "adapter-one"
+	if sameProbeIdentity(withBypass, withInterface) {
+		t.Fatal("changing the bound interface did not reset probe identity")
 	}
 }
 

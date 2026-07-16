@@ -45,6 +45,7 @@ const (
 	StatusHTTPError         = "http_error"
 	StatusUnexpectedHTTP    = "unexpected_http_status"
 	StatusPacketLoss        = "packet_loss"
+	StatusTUNBypassError    = "tun_bypass_error"
 	StatusOther             = "other"
 )
 
@@ -63,17 +64,19 @@ const (
 // Target is either a direct TCP endpoint or a Google probe reached through a
 // local SOCKS5 entry owned by the user's proxy client.
 type Target struct {
-	ID               string `json:"id"`
-	Name             string `json:"name"`
-	Kind             string `json:"kind"`
-	Host             string `json:"host"`
-	Port             int    `json:"port"`
-	ProxyHost        string `json:"proxy_host,omitempty"`
-	ProxyPort        int    `json:"proxy_port,omitempty"`
-	Google204Enabled bool   `json:"google_204_enabled"`
-	IntervalMS       int    `json:"interval_ms"`
-	TimeoutMS        int    `json:"timeout_ms"`
-	Enabled          bool   `json:"enabled"`
+	ID                string `json:"id"`
+	Name              string `json:"name"`
+	Kind              string `json:"kind"`
+	Host              string `json:"host"`
+	Port              int    `json:"port"`
+	ProxyHost         string `json:"proxy_host,omitempty"`
+	ProxyPort         int    `json:"proxy_port,omitempty"`
+	Google204Enabled  bool   `json:"google_204_enabled"`
+	BypassTUN         bool   `json:"bypass_tun"`
+	BypassInterfaceID string `json:"bypass_interface_id"`
+	IntervalMS        int    `json:"interval_ms"`
+	TimeoutMS         int    `json:"timeout_ms"`
+	Enabled           bool   `json:"enabled"`
 }
 
 // Sample is the result of one scheduled logical probe. Latency remains present
@@ -171,6 +174,7 @@ func normalizeAndValidateTarget(t Target) (Target, error) {
 	t.Kind = strings.TrimSpace(t.Kind)
 	t.Host = strings.TrimSpace(t.Host)
 	t.ProxyHost = strings.TrimSpace(t.ProxyHost)
+	t.BypassInterfaceID = strings.TrimSpace(t.BypassInterfaceID)
 	if t.Kind == "" {
 		t.Kind = ProbeKindDirectTCP
 	}
@@ -192,6 +196,9 @@ func normalizeAndValidateTarget(t Target) (Target, error) {
 		t.ProxyHost = ""
 		t.ProxyPort = 0
 		t.Google204Enabled = false
+		if len(t.BypassInterfaceID) > 256 || containsControl(t.BypassInterfaceID) {
+			return Target{}, errors.New("bypass_interface_id must be at most 256 characters without control characters")
+		}
 	case ProbeKindProxyGoogle:
 		t.Host = GoogleProbeHost
 		t.Port = GoogleProbePort
@@ -204,6 +211,8 @@ func normalizeAndValidateTarget(t Target) (Target, error) {
 		if t.IntervalMS < minNodeIntervalMS {
 			return Target{}, fmt.Errorf("proxy_google interval_ms must be at least %d", minNodeIntervalMS)
 		}
+		t.BypassTUN = false
+		t.BypassInterfaceID = ""
 	default:
 		return Target{}, errors.New("kind must be direct_tcp or proxy_google")
 	}
@@ -230,7 +239,9 @@ func sameProbeIdentity(left, right Target) bool {
 		left.Port == right.Port &&
 		strings.EqualFold(left.ProxyHost, right.ProxyHost) &&
 		left.ProxyPort == right.ProxyPort &&
-		left.Google204Enabled == right.Google204Enabled
+		left.Google204Enabled == right.Google204Enabled &&
+		left.BypassTUN == right.BypassTUN &&
+		left.BypassInterfaceID == right.BypassInterfaceID
 }
 
 func validID(id string) bool {

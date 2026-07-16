@@ -27,6 +27,11 @@ func probeTCP(parent context.Context, target Target) Sample {
 
 type hostResolver func(context.Context, string, time.Duration) ([]string, error)
 
+type tcpDialAttempt struct {
+	address string
+	dial    func(context.Context, string) (net.Conn, error)
+}
+
 func probeTCPWithResolver(parent context.Context, target Target, resolver hostResolver) Sample {
 	host := strings.TrimPrefix(strings.TrimSuffix(target.Host, "]"), "[")
 	addresses, err := resolver(parent, host, time.Duration(target.TimeoutMS)*time.Millisecond)
@@ -39,15 +44,23 @@ func probeTCPWithResolver(parent context.Context, target Target, resolver hostRe
 		}
 	}
 
+	attempts, preparationErr := prepareTCPDialAttempts(addresses, target)
+	likelyFakeIP := target.BypassTUN && resolvedContainsLikelyFakeIP(host, addresses)
+	if len(attempts) == 0 {
+		if preparationErr == nil {
+			preparationErr = newTUNBypassError("没有与目标地址族匹配的物理网卡")
+		}
+		sample := failedProbeSample(target.ID, time.Now(), StatusTUNBypassError, preparationErr)
+		sample.Message = truncateMessage(appendFakeIPHint(sample.Message, likelyFakeIP), 240)
+		return sample
+	}
 	ctx, cancel := context.WithTimeout(parent, time.Duration(target.TimeoutMS)*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	dialer := &net.Dialer{}
 	var lastError error
 	lastStatus := StatusOther
-	for index, resolved := range addresses {
-		address := net.JoinHostPort(resolved, strconv.Itoa(target.Port))
-		connection, dialError := dialer.DialContext(ctx, "tcp", address)
+	for index, attempt := range attempts {
+		connection, dialError := attempt.dial(ctx, attempt.address)
 		completed := time.Now()
 		if dialError == nil {
 			latency := math.Round(float64(completed.Sub(started).Microseconds())/1000*1000) / 1000
@@ -56,18 +69,61 @@ func probeTCPWithResolver(parent context.Context, target Target, resolver hostRe
 		}
 
 		lastError = dialError
-		lastStatus = classifyProbeError(dialError)
+		if isTUNBypassError(dialError) {
+			lastStatus = StatusTUNBypassError
+		} else {
+			lastStatus = classifyProbeError(dialError)
+		}
+		if target.BypassTUN && shouldInvalidateInterfaceCache(dialError) {
+			bypassInterfaceCatalog.invalidate()
+		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			lastStatus = StatusTimeout
 		}
-		if lastStatus == StatusTimeout || index == len(addresses)-1 {
-			return failedProbeSample(target.ID, completed, lastStatus, lastError)
+		if lastStatus == StatusTimeout || index == len(attempts)-1 {
+			sample := failedProbeSample(target.ID, completed, lastStatus, lastError)
+			sample.Message = truncateMessage(appendFakeIPHint(sample.Message, likelyFakeIP), 240)
+			return sample
 		}
-		if lastStatus != StatusNoRoute && lastStatus != StatusRefused && lastStatus != StatusOther {
-			return failedProbeSample(target.ID, completed, lastStatus, lastError)
+		if lastStatus != StatusNoRoute && lastStatus != StatusRefused && lastStatus != StatusOther && lastStatus != StatusTUNBypassError {
+			sample := failedProbeSample(target.ID, completed, lastStatus, lastError)
+			sample.Message = truncateMessage(appendFakeIPHint(sample.Message, likelyFakeIP), 240)
+			return sample
 		}
 	}
-	return failedProbeSample(target.ID, time.Now(), lastStatus, lastError)
+	sample := failedProbeSample(target.ID, time.Now(), lastStatus, lastError)
+	sample.Message = truncateMessage(appendFakeIPHint(sample.Message, likelyFakeIP), 240)
+	return sample
+}
+
+func prepareTCPDialAttempts(addresses []string, target Target) ([]tcpDialAttempt, error) {
+	attempts := make([]tcpDialAttempt, 0, len(addresses))
+	if !target.BypassTUN {
+		dialer := &net.Dialer{}
+		for _, resolved := range addresses {
+			attempts = append(attempts, tcpDialAttempt{
+				address: net.JoinHostPort(resolved, strconv.Itoa(target.Port)),
+				dial: func(ctx context.Context, address string) (net.Conn, error) {
+					return dialer.DialContext(ctx, "tcp", address)
+				},
+			})
+		}
+		return attempts, nil
+	}
+
+	var lastError error
+	for _, resolved := range addresses {
+		plan, err := prepareBypassDialPlan(resolved, target.BypassInterfaceID)
+		if err != nil {
+			lastError = err
+			continue
+		}
+		attempts = append(attempts, tcpDialAttempt{
+			address: net.JoinHostPort(resolved, strconv.Itoa(target.Port)),
+			dial:    plan.dial,
+		})
+	}
+	return attempts, lastError
 }
 
 func failedProbeSample(targetID string, completed time.Time, status string, err error) Sample {

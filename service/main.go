@@ -97,9 +97,12 @@ func runService(options serviceOptions, stdin io.Reader, stdout io.Writer) error
 		if err := store.Save(targets); err != nil {
 			return fmt.Errorf("save default targets: %w", err)
 		}
-	} else if applyTargetDefaults(targets) {
-		if err := store.Save(targets); err != nil {
-			return fmt.Errorf("migrate target configuration: %w", err)
+	} else {
+		changed := applyTargetDefaults(targets)
+		if store.NeedsMigration() || changed {
+			if err := store.Save(targets); err != nil {
+				return fmt.Errorf("migrate target configuration: %w", err)
+			}
 		}
 	}
 
@@ -178,7 +181,7 @@ func configureLogging(dataDir string) (*os.File, error) {
 
 func defaultTargets() []Target {
 	return []Target{
-		{ID: "example-cloudflare", Name: "Cloudflare HTTPS", Kind: ProbeKindDirectTCP, Host: "1.1.1.1", Port: 443, IntervalMS: 5000, TimeoutMS: 2000, Enabled: true},
-		{ID: "example-google-dns", Name: "Google DNS (TCP)", Kind: ProbeKindDirectTCP, Host: "8.8.8.8", Port: 53, IntervalMS: 5000, TimeoutMS: 2000, Enabled: true},
+		{ID: "example-cloudflare", Name: "Cloudflare HTTPS", Kind: ProbeKindDirectTCP, Host: "1.1.1.1", Port: 443, BypassTUN: true, IntervalMS: 5000, TimeoutMS: 2000, Enabled: true},
+		{ID: "example-google-dns", Name: "Google DNS (TCP)", Kind: ProbeKindDirectTCP, Host: "8.8.8.8", Port: 53, BypassTUN: true, IntervalMS: 5000, TimeoutMS: 2000, Enabled: true},
 	}
 }

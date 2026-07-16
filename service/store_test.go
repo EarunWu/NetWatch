@@ -76,6 +76,40 @@ func TestConfigStoreLoadsV2WithGoogle204DisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestConfigStoreLoadsV3WithBypassDisabledAndMarksMigration(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "targets.json")
+	versionThree := `{"version":3,"targets":[{"id":"direct","name":"Direct","kind":"direct_tcp","host":"1.1.1.1","port":443,"google_204_enabled":false,"interval_ms":5000,"timeout_ms":2000,"enabled":true}]}`
+	if err := os.WriteFile(path, []byte(versionThree), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewConfigStore(directory)
+	targets, exists, err := store.Load()
+	if err != nil || !exists || len(targets) != 1 {
+		t.Fatalf("version 3 config failed to load: %#v %v %v", targets, exists, err)
+	}
+	if targets[0].BypassTUN || targets[0].BypassInterfaceID != "" {
+		t.Fatalf("legacy direct target unexpectedly enabled bypass: %#v", targets[0])
+	}
+	if !store.NeedsMigration() {
+		t.Fatal("version 3 config was not marked for migration")
+	}
+	if err := store.Save(targets); err != nil {
+		t.Fatal(err)
+	}
+	if store.NeedsMigration() {
+		t.Fatal("saved version 4 config still needs migration")
+	}
+}
+
+func TestDefaultTargetsEnableTUNBypass(t *testing.T) {
+	for _, target := range defaultTargets() {
+		if target.Kind == ProbeKindDirectTCP && !target.BypassTUN {
+			t.Fatalf("new default target did not enable bypass: %#v", target)
+		}
+	}
+}
+
 func TestApplyTargetDefaultsMigratesLegacyKind(t *testing.T) {
 	targets := []Target{{Name: "Legacy"}, {Name: "Node", Kind: ProbeKindProxyGoogle}}
 	if !applyTargetDefaults(targets) || targets[0].Kind != ProbeKindDirectTCP || targets[1].Kind != ProbeKindProxyGoogle {

@@ -102,7 +102,9 @@ src-tauri/target/release/bundle/nsis/
 
 填写目标主机或 IP、TCP 端口、探测间隔和超时。计时从 DNS 解析完成后、第一次 TCP Dial 开始，到 TCP 建连完成为止，因此界面延迟不包含 DNS 耗时。域名解析和后续 TCP 拨号分别拥有一个 `timeout_ms` 预算，所以极端情况下单轮墙钟时间可能接近两倍超时；同一域名解析出的多个地址共享 TCP 拨号阶段的预算，并按系统顺序依次尝试。
 
-如果希望 v2rayN 开启 TUN 后仍让直接 TCP 目标绕过代理，请参考下方的 [v2rayN TUN 绕过](#v2rayn-tun-绕过)。
+新建直接 TCP 目标默认开启“绕过 TUN”。NetWatch 会自动选择带默认网关且路由成本较低的物理网卡，也可以手动指定网卡；探测 Socket 会同时绑定网卡和对应本地地址。绑定失败会明确显示“绕过 TUN 失败”，不会退回可能产生约 `1 ms` 假延迟的普通 TUN 路径。升级前已经存在的目标默认保持关闭，可在编辑目标时逐个开启。
+
+域名仍由系统 DNS 解析，DNS 耗时不计入 TCP 延迟。如果 v2rayN、Clash 等组件向系统 DNS 返回 FakeIP，物理直连无法使用该地址时会给出提示，此时应改填目标真实 IP。
 
 ### 代理节点探测
 
@@ -148,6 +150,7 @@ src-tauri/target/release/bundle/nsis/
 | `timeout` | 超时阈值内没有完成探测 | 分子和分母 |
 | `refused` | 直接 TCP 对端明确拒绝连接 | 分子和分母 |
 | `dns_error` / `no_route` | DNS 或路由失败 | 分子和分母 |
+| `tun_bypass_error` | 未找到指定物理网卡、地址族不匹配或 Socket 绑定校验失败 | 分子和分母 |
 | 其他错误 | SOCKS5、TLS、HTTP 或其他 Socket 错误 | 分子和分母 |
 
 每个目标使用最近 30 次有效完成测量的中位数作为滚动基准，积累至少 10 次后启用尖峰判断。当本次延迟严格超过下面的阈值时，本轮记为一次推定丢包：
@@ -219,18 +222,16 @@ macOS：
 
 ## v2rayN TUN 绕过
 
-在 v2rayN 的路由规则中新增一条规则：
+不需要再为 `NetWatch.Service.exe` 配置整进程 `direct` 路由。整进程规则会同时影响节点探测对本机 SOCKS5 端口的访问，而且部分 TUN 栈仍可能在本机提前完成 TCP 建连，使结果继续接近 `1 ms`。
 
-| 字段 | 填写内容 |
-| --- | --- |
-| 别名 | `NetWatch Direct`（可自定义） |
-| outboundTag | `direct` |
-| network | `tcp` |
-| 进程（TUN 模式） | `NetWatch.Service.exe` |
+请在直接 TCP 目标中开启“绕过 TUN”：
 
-Domain、IP、port 和 inboundTag 可以留空，并将这条规则放在最终代理或兜底规则之前。直接 TCP 探测由 `NetWatch.Service.exe` 创建 Socket，因此应绕过该进程，而不是 `NetWatch.exe` 或 `msedgewebview2.exe`。
+1. “自动选择”适合只有一个正常物理出口的设备；
+2. 同时连接 Wi-Fi、以太网或多个出口时，可以指定具体网卡；
+3. 指定网卡断开、地址族不匹配或 Socket 绑定失败时，目标会显示明确错误，不会切回 TUN；
+4. 节点探测不使用这个开关，仍按原路径连接本机 SOCKS5，再由代理核心访问 Google。
 
-节点模式只由 NetWatch 连接本机 SOCKS5 回环端口，真正的远端出站 Socket 由代理核心创建，所以这条 direct 规则不会把节点探测错误地绕过代理。域名目标的系统 DNS 请求不一定归属于 NetWatch 进程；需要严格控制解析路径时，建议直接填写 IP 地址。
+Windows 使用系统的按 Socket 出口接口选项实现，无需管理员权限、系统路由修改或额外后台服务。macOS 已保留对应实现并通过交叉编译检查，但当前尚未在 Mac 实机和 TUN 环境中验证。
 
 ## 开发与测试
 

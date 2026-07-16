@@ -1424,6 +1424,39 @@ button:disabled {
   margin-top: 0;
 }
 
+.tun-bypass-option {
+  margin-top: 0;
+}
+
+.tun-bypass-note {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(85, 166, 255, 0.14);
+  border-radius: 9px;
+  background: rgba(85, 166, 255, 0.045);
+  color: #9fb4cb;
+  font-size: 12px;
+}
+
+.tun-bypass-note button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #73b8ff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tun-bypass-note small {
+  grid-column: 1 / -1;
+  color: var(--text-dim);
+  line-height: 1.55;
+}
+
 .enable-row > span:first-child {
   display: flex;
   flex-direction: column;

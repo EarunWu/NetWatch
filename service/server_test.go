@@ -36,6 +36,28 @@ func localRequest(method, target string, body io.Reader) *http.Request {
 	return request
 }
 
+func TestNetworkInterfacesAPI(t *testing.T) {
+	monitor, server := testServer(t)
+	defer monitor.Close()
+	server.listInterfaces = func() ([]NetworkInterfaceInfo, error) {
+		return []NetworkInterfaceInfo{{
+			ID: "adapter-one", Name: "Ethernet", Addresses: []string{"192.0.2.10"}, Families: []string{"ipv4"}, IsDefault: true,
+		}}, nil
+	}
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, localRequest(http.MethodGet, "/api/network-interfaces", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":"adapter-one"`) || !strings.Contains(response.Body.String(), `"is_default":true`) {
+		t.Fatalf("unexpected interface response: %d %s", response.Code, response.Body.String())
+	}
+
+	server.listInterfaces = func() ([]NetworkInterfaceInfo, error) { return nil, errors.New("unavailable") }
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, localRequest(http.MethodGet, "/api/network-interfaces", nil))
+	if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), "interface_discovery_failed") {
+		t.Fatalf("unexpected discovery error response: %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestAPIOriginStaticFallbackAndCRUD(t *testing.T) {
 	monitor, server := testServer(t)
 	defer monitor.Close()
@@ -114,7 +136,7 @@ func TestAPIOriginStaticFallbackAndCRUD(t *testing.T) {
 		t.Fatalf("SPA fallback failed: %d %s", response.Code, response.Body.String())
 	}
 
-	created := Target{Name: "Two", Host: "127.0.0.1", Port: 8443, IntervalMS: 1000, TimeoutMS: 500, Enabled: false}
+	created := Target{Name: "Two", Host: "127.0.0.1", Port: 8443, BypassTUN: true, BypassInterfaceID: "adapter-one", IntervalMS: 1000, TimeoutMS: 500, Enabled: false}
 	payload, _ := json.Marshal(created)
 	request = localRequest(http.MethodPost, "/api/targets", bytes.NewReader(payload))
 	request.Header.Set("Content-Type", "application/json")
@@ -125,7 +147,7 @@ func TestAPIOriginStaticFallbackAndCRUD(t *testing.T) {
 		t.Fatalf("create failed: %d %s", response.Code, response.Body.String())
 	}
 	var target Target
-	if err := json.Unmarshal(response.Body.Bytes(), &target); err != nil || target.ID == "" {
+	if err := json.Unmarshal(response.Body.Bytes(), &target); err != nil || target.ID == "" || !target.BypassTUN || target.BypassInterfaceID != "adapter-one" {
 		t.Fatalf("invalid created target: %#v %v", target, err)
 	}
 
@@ -137,6 +159,10 @@ func TestAPIOriginStaticFallbackAndCRUD(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("update failed: %d %s", response.Code, response.Body.String())
+	}
+	var updated Target
+	if err := json.Unmarshal(response.Body.Bytes(), &updated); err != nil || !updated.BypassTUN || updated.BypassInterfaceID != "adapter-one" {
+		t.Fatalf("update lost bypass settings: %#v %v", updated, err)
 	}
 
 	request = localRequest(http.MethodDelete, "/api/targets/"+target.ID, nil)
