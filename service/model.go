@@ -61,8 +61,8 @@ const (
 	StageHTTP       = "http"
 )
 
-// Target is either a direct TCP endpoint or a Google probe reached through a
-// local SOCKS5 entry owned by the user's proxy client.
+// Target is either a direct TCP endpoint or a configurable TLS endpoint
+// reached through a local SOCKS5 entry owned by the user's proxy client.
 type Target struct {
 	ID                string `json:"id"`
 	Name              string `json:"name"`
@@ -200,16 +200,26 @@ func normalizeAndValidateTarget(t Target) (Target, error) {
 			return Target{}, errors.New("bypass_interface_id must be at most 256 characters without control characters")
 		}
 	case ProbeKindProxyGoogle:
-		t.Host = GoogleProbeHost
-		t.Port = GoogleProbePort
+		if t.Host == "" {
+			t.Host = GoogleProbeHost
+		}
+		if t.Port == 0 {
+			t.Port = GoogleProbePort
+		}
+		if err := validateHost(t.Host); err != nil {
+			return Target{}, err
+		}
+		if t.Port < 1 || t.Port > 65535 {
+			return Target{}, errors.New("port must be between 1 and 65535")
+		}
 		if !validLoopbackProxyHost(t.ProxyHost) {
-			return Target{}, errors.New("proxy_host must be 127.0.0.1 or localhost")
+			return Target{}, errors.New("proxy_host must be a loopback address or localhost")
 		}
 		if t.ProxyPort < 1 || t.ProxyPort > 65535 {
 			return Target{}, errors.New("proxy_port must be between 1 and 65535")
 		}
 		if t.IntervalMS < minNodeIntervalMS {
-			return Target{}, fmt.Errorf("proxy_google interval_ms must be at least %d", minNodeIntervalMS)
+			return Target{}, fmt.Errorf("node probe interval_ms must be at least %d", minNodeIntervalMS)
 		}
 		t.BypassTUN = false
 		t.BypassInterfaceID = ""

@@ -14,6 +14,7 @@ import {
 
 type ConnectionState = "connecting" | "live" | "offline";
 type ProbeKind = "direct_tcp" | "proxy_google";
+type AppTheme = "dark" | "light";
 
 type Target = {
   id: string;
@@ -181,17 +182,56 @@ const API_BASE = (
 const SERVICE_UNAVAILABLE_MESSAGE =
   "无法连接本地监测核心（127.0.0.1:9288）。服务可能仍在启动、正在重启，或连接被系统网络策略阻止。";
 const VIEW_PREFERENCES_KEY = "netwatch.desktop-view.v1";
+const THEME_PREFERENCE_KEY = "netwatch.theme.v1";
 
-const SERIES_COLORS = [
-  "#55a6ff",
-  "#20d3a6",
-  "#f7b84b",
-  "#ad8cff",
-  "#ff748c",
-  "#65d36e",
-  "#55d5e8",
-  "#ff915a",
-];
+const SERIES_COLORS: Record<AppTheme, string[]> = {
+  dark: [
+    "#55a6ff",
+    "#20d3a6",
+    "#f7b84b",
+    "#ad8cff",
+    "#ff748c",
+    "#65d36e",
+    "#55d5e8",
+    "#ff915a",
+  ],
+  light: [
+    "#1677d2",
+    "#078564",
+    "#b86b00",
+    "#7655c7",
+    "#cc3e60",
+    "#318341",
+    "#147f96",
+    "#bd5726",
+  ],
+};
+
+const CHART_THEME_COLORS = {
+  dark: {
+    gridStrong: "rgba(129, 151, 181, .24)",
+    grid: "rgba(129, 151, 181, .12)",
+    label: "#9cabbf",
+    pointFill: "#101722",
+    empty: "#8a98aa",
+  },
+  light: {
+    gridStrong: "rgba(71, 91, 117, .25)",
+    grid: "rgba(71, 91, 117, .13)",
+    label: "#65758a",
+    pointFill: "#ffffff",
+    empty: "#718096",
+  },
+} satisfies Record<
+  AppTheme,
+  {
+    gridStrong: string;
+    grid: string;
+    label: string;
+    pointFill: string;
+    empty: string;
+  }
+>;
 
 const RANGE_OPTIONS = [
   { label: "15 分钟", value: 900_000 },
@@ -234,9 +274,9 @@ const DEFAULT_FORM: TargetFormValues = {
   enabled: true,
 };
 
-const GOOGLE_PROBE_HOST = "www.google.com";
-const GOOGLE_PROBE_PORT = 443;
-const GOOGLE_PROBE_PATH = "/generate_204";
+const DEFAULT_NODE_PROBE_HOST = "www.google.com";
+const DEFAULT_NODE_PROBE_PORT = 443;
+const NODE_PROBE_204_PATH = "/generate_204";
 
 const LOSS_RATE_EXPLANATION =
   "按体验层估算：每个目标使用最近 30 次有效测量的中位数作为滚动基准，积累至少 10 次后启用。当本次延迟超过 max（基准 × 2，基准 + 200ms）时，即使连接最终完成，也按一次延迟尖峰计入丢包；连接超时或其他最终失败同样计入。尖峰会保留真实延迟并显示在折线图上。该指标也可能受到排队、服务器负载或路由变化影响，不等同于物理链路的包级丢包率。";
@@ -374,6 +414,32 @@ function saveViewPreferences(preferences: ViewPreferences) {
   }
 }
 
+function normalizeThemePreference(value: unknown): AppTheme {
+  return value === "light" ? "light" : "dark";
+}
+
+function loadThemePreference(
+  storage: Pick<Storage, "getItem"> = window.localStorage,
+): AppTheme {
+  try {
+    return normalizeThemePreference(storage.getItem(THEME_PREFERENCE_KEY));
+  } catch {
+    return "dark";
+  }
+}
+
+function saveThemePreference(
+  theme: AppTheme,
+  storage: Pick<Storage, "setItem"> = window.localStorage,
+) {
+  try {
+    storage.setItem(THEME_PREFERENCE_KEY, theme);
+  } catch {
+    // Theme persistence is optional; the monitoring UI must remain usable
+    // when the WebView storage is unavailable.
+  }
+}
+
 function normalizeStatus(value: unknown): string {
   return readString(value, "error").trim().toLowerCase().replaceAll("-", "_");
 }
@@ -421,17 +487,21 @@ function statusKind(status: string):
 function normalizeTarget(value: unknown, index = 0): Target | null {
   const record = asRecord(value);
   if (!record) return null;
-  const host = readString(
+  const rawHost = readString(
     record.host,
     record.hostname,
     record.address,
     record.ip,
   ).trim();
-  const port = readNumber(record.port, record.tcp_port) ?? 0;
+  const rawPort = readNumber(record.port, record.tcp_port) ?? 0;
   const kind =
     readString(record.kind, record.probe_kind).toLowerCase() === "proxy_google"
       ? "proxy_google"
       : "direct_tcp";
+  const host =
+    rawHost || (kind === "proxy_google" ? DEFAULT_NODE_PROBE_HOST : "");
+  const port =
+    rawPort || (kind === "proxy_google" ? DEFAULT_NODE_PROBE_PORT : 0);
   const id = readString(
     record.id,
     record.target_id,
@@ -954,6 +1024,9 @@ export const __testing = {
   buildLatencySeries,
   buildLossEvents,
   lossStatusLabel,
+  normalizeThemePreference,
+  loadThemePreference,
+  saveThemePreference,
 };
 
 function getTargetState(
@@ -977,8 +1050,8 @@ function getTargetState(
       detail:
         target.kind === "proxy_google"
           ? target.google_204_enabled
-            ? "等待首次 Google 204 探测"
-            : "等待首次 Google TLS 探测"
+            ? "等待首次 HTTP 204 探测"
+            : "等待首次终点 TLS 探测"
           : "等待首次 TCP 探测",
       kind: "waiting",
     };
@@ -1020,7 +1093,7 @@ function getTargetState(
     return {
       tone: "danger",
       label: "SOCKS5 异常",
-      detail: latest.message || "代理客户端未能建立 Google TCP 隧道",
+      detail: latest.message || "代理客户端未能建立到测试终点的 TCP 隧道",
       kind: "error",
     };
   }
@@ -1028,7 +1101,7 @@ function getTargetState(
     return {
       tone: "danger",
       label: "TLS 异常",
-      detail: latest.message || "已建立隧道，但 Google TLS 握手失败",
+      detail: latest.message || "已建立隧道，但测试终点 TLS 握手失败",
       kind: "error",
     };
   }
@@ -1038,7 +1111,7 @@ function getTargetState(
   ) {
     return {
       tone: "danger",
-      label: "Google 回包异常",
+      label: "HTTP 204 回包异常",
       detail: latest.message || "未收到预期的 HTTP 204",
       kind: "error",
     };
@@ -1051,8 +1124,8 @@ function getTargetState(
       detail:
         target.kind === "proxy_google"
           ? target.google_204_enabled
-            ? "已通过节点收到 Google HTTP 204"
-            : "已通过节点完成 Google TLS 握手"
+            ? "已通过节点收到测试终点 HTTP 204"
+            : "已通过节点完成测试终点 TLS 握手"
           : "TCP 连接正常",
       kind,
     };
@@ -1066,7 +1139,7 @@ function getTargetState(
             ? "隧道超时"
             : latest.stage === "tls"
               ? "TLS 超时"
-              : "Google 超时"
+              : "终点超时"
           : "连接超时",
       detail:
         latest.message ||
@@ -1139,8 +1212,9 @@ function formatRelative(timestamp: number, now: number): string {
   return Math.floor(minutes / 60) + " 小时前";
 }
 
-function colorForIndex(index: number): string {
-  return SERIES_COLORS[index % SERIES_COLORS.length];
+function colorForIndex(index: number, theme: AppTheme = "dark"): string {
+  const palette = SERIES_COLORS[theme];
+  return palette[index % palette.length];
 }
 
 function niceCeiling(value: number): number {
@@ -1217,6 +1291,7 @@ function buildLatencySeries(
   targets: Target[],
   samplesByTarget: Record<string, Sample[]>,
   visible: Record<string, boolean>,
+  theme: AppTheme = "dark",
 ): ChartSeries[] {
   return targets.flatMap((target, index) => {
     if (visible[target.id] === false) return [];
@@ -1226,7 +1301,7 @@ function buildLatencySeries(
         {
           id: target.id + ":tls-complete",
           name: target.name + " · TLS完成",
-          color: colorForIndex(index),
+          color: colorForIndex(index, theme),
           intervalMs: target.interval_ms,
           dash: [],
           points: samples.map((sample) => ({
@@ -1244,7 +1319,7 @@ function buildLatencySeries(
       {
         id: target.id,
         name: target.name,
-        color: colorForIndex(index),
+        color: colorForIndex(index, theme),
         intervalMs: target.interval_ms,
         points: samples.map((sample) => ({
           ts: sample.ts,
@@ -1322,6 +1397,7 @@ function buildLossEvents(
   targets: Target[],
   samplesByTarget: Record<string, Sample[]>,
   visible: Record<string, boolean>,
+  theme: AppTheme = "dark",
 ): LossEvent[] {
   return targets.flatMap((target, targetIndex) => {
     if (visible[target.id] === false) return [];
@@ -1339,8 +1415,15 @@ function buildLossEvents(
             id:
               target.id + ":loss:" + sample.ts + ":" + sampleIndex,
             name: target.name,
-            color: colorForIndex(targetIndex),
-            markerColor: estimated ? "#f7b84b" : "#ff748c",
+            color: colorForIndex(targetIndex, theme),
+            markerColor:
+              theme === "light"
+                ? estimated
+                  ? "#b86b00"
+                  : "#cf3558"
+                : estimated
+                  ? "#f7b84b"
+                  : "#ff748c",
             kind: estimated ? "estimated" : "failure",
             value:
               measuredValue !== null && Number.isFinite(measuredValue)
@@ -1396,9 +1479,62 @@ function TargetModal({
       : DEFAULT_FORM,
   );
   const [validation, setValidation] = useState("");
+  const directEndpointRef = useRef({
+    host: target?.kind === "direct_tcp" ? target.host : DEFAULT_FORM.host,
+    port:
+      target?.kind === "direct_tcp"
+        ? String(target.port)
+        : DEFAULT_FORM.port,
+  });
+  const nodeEndpointRef = useRef({
+    host:
+      target?.kind === "proxy_google"
+        ? target.host
+        : DEFAULT_NODE_PROBE_HOST,
+    port:
+      target?.kind === "proxy_google"
+        ? String(target.port)
+        : String(DEFAULT_NODE_PROBE_PORT),
+  });
 
   const update = (key: keyof TargetFormValues, value: string | boolean) => {
     setValues((previous) => ({ ...previous, [key]: value }));
+    setValidation("");
+  };
+
+  const changeKind = (kind: ProbeKind) => {
+    setValues((previous) => {
+      if (previous.kind === kind) return previous;
+      if (previous.kind === "direct_tcp") {
+        directEndpointRef.current = {
+          host: previous.host,
+          port: previous.port,
+        };
+      } else {
+        nodeEndpointRef.current = {
+          host: previous.host,
+          port: previous.port,
+        };
+      }
+      const endpoint =
+        kind === "direct_tcp"
+          ? directEndpointRef.current
+          : nodeEndpointRef.current;
+      return {
+        ...previous,
+        kind,
+        host: endpoint.host,
+        port: endpoint.port,
+        interval_ms: kind === "proxy_google" ? "5000" : "2000",
+        timeout_ms: kind === "proxy_google" ? "8000" : "1500",
+        bypass_tun:
+          kind === "direct_tcp"
+            ? target?.kind === "direct_tcp"
+              ? target.bypass_tun
+              : true
+            : previous.bypass_tun,
+      };
+    });
     setValidation("");
   };
 
@@ -1412,15 +1548,22 @@ function TargetModal({
       setValidation("请填写便于识别的目标名称。");
       return;
     }
-    if (values.kind === "direct_tcp" && !values.host.trim()) {
-      setValidation("请填写主机名或 IP 地址。");
+    if (!values.host.trim()) {
+      setValidation(
+        values.kind === "proxy_google"
+          ? "请填写节点探测的测试主机名或 IP 地址。"
+          : "请填写主机名或 IP 地址。",
+      );
       return;
     }
     if (
-      values.kind === "direct_tcp" &&
       (!Number.isInteger(port) || port < 1 || port > 65535)
     ) {
-      setValidation("端口必须是 1–65535 之间的整数。");
+      setValidation(
+        values.kind === "proxy_google"
+          ? "TLS 端口必须是 1–65535 之间的整数。"
+          : "端口必须是 1–65535 之间的整数。",
+      );
       return;
     }
     if (
@@ -1447,7 +1590,7 @@ function TargetModal({
     ) {
       setValidation(
         values.kind === "proxy_google"
-          ? "Google 节点探测间隔需在 2 秒至 1 小时之间。"
+          ? "节点探测间隔需在 2 秒至 1 小时之间。"
           : "探测间隔需在 500 毫秒至 1 小时之间。",
       );
       return;
@@ -1459,14 +1602,8 @@ function TargetModal({
     await onSubmit({
       ...values,
       name: values.name.trim(),
-      host:
-        values.kind === "proxy_google"
-          ? GOOGLE_PROBE_HOST
-          : values.host.trim(),
-      port:
-        values.kind === "proxy_google"
-          ? String(GOOGLE_PROBE_PORT)
-          : values.port,
+      host: values.host.trim(),
+      port: values.port,
       proxy_host:
         values.kind === "proxy_google"
           ? values.proxy_host.trim()
@@ -1519,22 +1656,7 @@ function TargetModal({
               type="button"
               className={values.kind === "direct_tcp" ? "active" : ""}
               aria-pressed={values.kind === "direct_tcp"}
-              onClick={() =>
-                setValues((previous) => ({
-                  ...previous,
-                  kind: "direct_tcp",
-                  interval_ms:
-                    previous.kind === "proxy_google" ? "2000" : previous.interval_ms,
-                  timeout_ms:
-                    previous.kind === "proxy_google" ? "1500" : previous.timeout_ms,
-                  bypass_tun:
-                    previous.kind === "proxy_google"
-                      ? target?.kind === "direct_tcp"
-                        ? target.bypass_tun
-                        : true
-                      : previous.bypass_tun,
-                }))
-              }
+              onClick={() => changeKind("direct_tcp")}
             >
               <strong>直接 TCP</strong>
               <small>监控指定主机和端口</small>
@@ -1543,19 +1665,10 @@ function TargetModal({
               type="button"
               className={values.kind === "proxy_google" ? "active" : ""}
               aria-pressed={values.kind === "proxy_google"}
-              onClick={() =>
-                setValues((previous) => ({
-                  ...previous,
-                  kind: "proxy_google",
-                  interval_ms:
-                    previous.kind === "direct_tcp" ? "5000" : previous.interval_ms,
-                  timeout_ms:
-                    previous.kind === "direct_tcp" ? "8000" : previous.timeout_ms,
-                }))
-              }
+              onClick={() => changeKind("proxy_google")}
             >
               <strong>节点探测</strong>
-              <small>SOCKS5 → 代理节点 → Google TLS</small>
+              <small>SOCKS5 → 代理节点 → 自定义 TLS 终点</small>
             </button>
           </div>
           <div className="form-grid">
@@ -1658,23 +1771,50 @@ function TargetModal({
               </>
             ) : (
               <>
+                <label className="field">
+                  <span>测试主机名或 IP</span>
+                  <input
+                    value={values.host}
+                    onChange={(event) => update("host", event.target.value)}
+                    placeholder={DEFAULT_NODE_PROBE_HOST}
+                    spellCheck={false}
+                    maxLength={253}
+                  />
+                </label>
+                <label className="field">
+                  <span>TLS 端口</span>
+                  <input
+                    inputMode="numeric"
+                    type="number"
+                    min="1"
+                    max="65535"
+                    value={values.port}
+                    onChange={(event) => update("port", event.target.value)}
+                  />
+                </label>
                 <div className="node-endpoint-note field-wide">
-                  <span>固定测试终点</span>
+                  <span>当前测试终点</span>
                   <strong>
                     {values.google_204_enabled
-                      ? `https://${GOOGLE_PROBE_HOST}${GOOGLE_PROBE_PATH}`
-                      : `${GOOGLE_PROBE_HOST}:${GOOGLE_PROBE_PORT}`}
+                      ? `https://${formatEndpoint(
+                          values.host || DEFAULT_NODE_PROBE_HOST,
+                          Number(values.port) || DEFAULT_NODE_PROBE_PORT,
+                        )}${NODE_PROBE_204_PATH}`
+                      : formatEndpoint(
+                          values.host || DEFAULT_NODE_PROBE_HOST,
+                          Number(values.port) || DEFAULT_NODE_PROBE_PORT,
+                        )}
                   </strong>
                   <small>
                     {values.google_204_enabled
-                      ? "TLS 完成后继续发送请求并验证 HTTP 204"
-                      : "默认在 TLS 握手完成后结束，不发送 HTTP 请求"}
+                      ? "TLS 完成后请求 /generate_204，并要求所选终点返回 HTTP 204"
+                      : "默认 Google；终点必须提供有效且与主机名匹配的 TLS 证书"}
                   </small>
                 </div>
                 <label className="enable-row node-http-option">
                   <span>
-                    <strong>继续验证 Google HTTP 204</strong>
-                    <small>增加一次 HTTP 请求响应；默认关闭</small>
+                    <strong>继续验证 HTTP 204</strong>
+                    <small>所选终点需要支持 /generate_204；默认关闭</small>
                   </span>
                   <input
                     className="switch-input"
@@ -1740,8 +1880,8 @@ function TargetModal({
               <small>
                 {values.kind === "proxy_google"
                   ? values.google_204_enabled
-                    ? "保存后经本地 SOCKS5 持续验证 Google TLS 与 HTTP 204"
-                    : "保存后经本地 SOCKS5 持续验证 Google TLS"
+                    ? "保存后经本地 SOCKS5 持续验证所选终点的 TLS 与 HTTP 204"
+                    : "保存后经本地 SOCKS5 持续验证所选 TLS 终点"
                   : "保存后按设定间隔发起 TCP 连接探测"}
               </small>
             </span>
@@ -1859,11 +1999,13 @@ function CanvasChart({
   events,
   windowMs,
   anchorTime,
+  theme,
 }: {
   series: ChartSeries[];
   events: LossEvent[];
   windowMs: number;
   anchorTime: number;
+  theme: AppTheme;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -1931,6 +2073,7 @@ function CanvasChart({
       height: Math.max(10, height - 54),
     };
     const start = anchorTime - windowMs;
+    const chartColors = CHART_THEME_COLORS[theme];
 
     const observedMax = Math.max(
       0,
@@ -1960,13 +2103,13 @@ function CanvasChart({
       context.beginPath();
       context.setLineDash(index === 0 ? [] : [3, 5]);
       context.strokeStyle =
-        index === 0 ? "rgba(129, 151, 181, .24)" : "rgba(129, 151, 181, .12)";
+        index === 0 ? chartColors.gridStrong : chartColors.grid;
       context.lineWidth = 1;
       context.moveTo(plot.x, y + 0.5);
       context.lineTo(plot.x + plot.width, y + 0.5);
       context.stroke();
       context.setLineDash([]);
-      context.fillStyle = "#9cabbf";
+      context.fillStyle = chartColors.label;
       context.textAlign = "right";
       context.fillText(Math.round(value) + " ms", plot.x - 8, y);
     }
@@ -1980,7 +2123,7 @@ function CanvasChart({
     for (let index = 0; index <= 4; index += 1) {
       const timestamp = start + (windowMs / 4) * index;
       const x = xFor(timestamp);
-      context.fillStyle = "#9cabbf";
+      context.fillStyle = chartColors.label;
       context.textAlign =
         index === 0 ? "left" : index === 4 ? "right" : "center";
       context.fillText(
@@ -2064,7 +2207,7 @@ function CanvasChart({
         const x = xFor(latest.ts);
         const y = yFor(latest.value);
         context.beginPath();
-        context.fillStyle = "#101722";
+        context.fillStyle = chartColors.pointFill;
         context.strokeStyle = item.color;
         context.lineWidth = 2;
         context.arc(x, y, 3.2, 0, Math.PI * 2);
@@ -2080,7 +2223,7 @@ function CanvasChart({
       if (event.kind === "estimated" && event.value !== null) {
         const y = yFor(event.value);
         context.beginPath();
-        context.fillStyle = "#101722";
+        context.fillStyle = chartColors.pointFill;
         context.strokeStyle = event.markerColor;
         context.lineWidth = 2.5;
         context.arc(x, y, 5, 0, Math.PI * 2);
@@ -2105,7 +2248,7 @@ function CanvasChart({
     });
 
     if (visiblePoints.length === 0 && visibleEvents.length === 0) {
-      context.fillStyle = "#8a98aa";
+      context.fillStyle = chartColors.empty;
       context.font = "600 14px system-ui, sans-serif";
       context.textAlign = "center";
       context.fillText(
@@ -2114,7 +2257,7 @@ function CanvasChart({
         plot.y + plot.height / 2,
       );
     }
-  }, [anchorTime, series, visibleEvents, visiblePoints, windowMs]);
+  }, [anchorTime, series, theme, visibleEvents, visiblePoints, windowMs]);
 
   useEffect(() => {
     draw();
@@ -2312,16 +2455,23 @@ function CanvasChart({
   );
 }
 
+function formatEndpoint(host: string, port: number): string {
+  const trimmed = host.trim();
+  const displayHost =
+    trimmed.includes(":") && !trimmed.startsWith("[")
+      ? `[${trimmed}]`
+      : trimmed;
+  return `${displayHost}:${port}`;
+}
+
 function targetEndpointText(
   target: Target,
   networkInterfaces: NetworkInterfaceInfo[] = [],
 ): string {
   if (target.kind === "proxy_google") {
-    return `SOCKS ${target.proxy_host}:${target.proxy_port} → Google TLS${
-      target.google_204_enabled ? " + 204" : ""
-    }`;
+    return `SOCKS ${formatEndpoint(target.proxy_host, target.proxy_port)} → ${formatEndpoint(target.host, target.port)} · TLS${target.google_204_enabled ? " + 204" : ""}`;
   }
-  const endpoint = `${target.host}:${target.port}`;
+  const endpoint = formatEndpoint(target.host, target.port);
   if (!target.bypass_tun) return endpoint;
   if (!target.bypass_interface_id) return `${endpoint} · 物理直连（自动）`;
   const selected = networkInterfaces.find(
@@ -2441,8 +2591,10 @@ function DesktopSidebar({
   connectionCopy,
   lastUpdated,
   now,
+  theme,
   onSelect,
   onToggleChart,
+  onToggleTheme,
 }: {
   targets: Target[];
   networkInterfaces: NetworkInterfaceInfo[];
@@ -2454,8 +2606,10 @@ function DesktopSidebar({
   connectionCopy: string;
   lastUpdated: number | null;
   now: number;
+  theme: AppTheme;
   onSelect: (targetId: string | null) => void;
   onToggleChart: (targetId: string) => void;
+  onToggleTheme: () => void;
 }) {
   const groups = [
     {
@@ -2485,6 +2639,15 @@ function DesktopSidebar({
           <strong>链路哨兵</strong>
           <small>NetWatch</small>
         </span>
+        <button
+          className="theme-toggle"
+          type="button"
+          aria-label={`切换为${theme === "dark" ? "浅色" : "深色"}主题`}
+          title={`切换为${theme === "dark" ? "浅色" : "深色"}主题`}
+          onClick={onToggleTheme}
+        >
+          <span aria-hidden="true">{theme === "dark" ? "☀" : "☾"}</span>
+        </button>
       </div>
 
       <div className="sidebar-section-title">
@@ -2543,7 +2706,9 @@ function DesktopSidebar({
                     >
                       <i
                         className={`sidebar-target-dot tone-${state.tone}`}
-                        style={{ borderColor: colorForIndex(Math.max(0, index)) }}
+                        style={{
+                          borderColor: colorForIndex(Math.max(0, index), theme),
+                        }}
                         aria-hidden="true"
                       />
                       <span>
@@ -2631,10 +2796,20 @@ export default function Home() {
   const [deleting, setDeleting] = useState(false);
   const [modalError, setModalError] = useState("");
   const [toast, setToast] = useState("");
+  const [theme, setTheme] = useState<AppTheme>(() => loadThemePreference());
   const [pageVisible, setPageVisible] = useState(
     () => document.visibilityState !== "hidden",
   );
   const serviceInstanceRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+    document
+      .querySelector('meta[name="theme-color"]')
+      ?.setAttribute("content", theme === "light" ? "#eef3f8" : "#090d13");
+    saveThemePreference(theme);
+  }, [theme]);
 
   useEffect(() => {
     saveViewPreferences({ rangeMs, selectedTargetId, visibleTargets });
@@ -3009,9 +3184,10 @@ export default function Home() {
         chartTargets,
         displaySamplesByTarget,
         chartVisibility,
+        theme,
       );
     },
-    [displaySamplesByTarget, displayTargets, selectedTarget, visibleTargets],
+    [displaySamplesByTarget, displayTargets, selectedTarget, theme, visibleTargets],
   );
   const lossEvents = useMemo(
     () => {
@@ -3023,9 +3199,10 @@ export default function Home() {
         chartTargets,
         displaySamplesByTarget,
         chartVisibility,
+        theme,
       );
     },
-    [displaySamplesByTarget, displayTargets, selectedTarget, visibleTargets],
+    [displaySamplesByTarget, displayTargets, selectedTarget, theme, visibleTargets],
   );
 
   const saveTarget = async (values: TargetFormValues) => {
@@ -3187,7 +3364,7 @@ export default function Home() {
         : "连接已中断";
 
   return (
-    <div className="desktop-app">
+    <div className="desktop-app" data-theme={theme}>
       <DesktopSidebar
         targets={displayTargets}
         networkInterfaces={networkInterfaces}
@@ -3199,12 +3376,16 @@ export default function Home() {
         connectionCopy={connectionCopy}
         lastUpdated={lastUpdated}
         now={now}
+        theme={theme}
         onSelect={setSelectedTargetId}
         onToggleChart={(targetId) =>
           setVisibleTargets((previous) => ({
             ...previous,
             [targetId]: previous[targetId] === false,
           }))
+        }
+        onToggleTheme={() =>
+          setTheme((previous) => (previous === "dark" ? "light" : "dark"))
         }
       />
 
@@ -3331,6 +3512,7 @@ export default function Home() {
                           (target) => target.id === selectedTarget.id,
                         ),
                       ),
+                      theme,
                     ),
                   }}
                 />
@@ -3357,7 +3539,7 @@ export default function Home() {
                 >
                   <i
                     aria-hidden="true"
-                    style={{ backgroundColor: colorForIndex(index) }}
+                    style={{ backgroundColor: colorForIndex(index, theme) }}
                   />
                   {target.name}
                 </button>
@@ -3380,6 +3562,7 @@ export default function Home() {
               events={lossEvents}
               windowMs={rangeMs}
               anchorTime={chartAnchor}
+              theme={theme}
             />
           </div>
         </section>
@@ -3452,7 +3635,7 @@ export default function Home() {
               >
                 ＋ 添加第一个目标
               </button>
-              <small>节点默认验证 Google TLS，可选继续验证 HTTP 204</small>
+              <small>节点测试终点默认 www.google.com:443，可在配置中修改</small>
             </div>
           ) : selectedTarget && selectedState && selectedLiveTarget ? (
             <div className="target-detail">
@@ -3468,6 +3651,7 @@ export default function Home() {
                             (target) => target.id === selectedTarget.id,
                           ),
                         ),
+                        theme,
                       ),
                     }}
                     aria-hidden="true"
@@ -3523,8 +3707,8 @@ export default function Home() {
                   <span>
                     {selectedTarget.kind === "proxy_google"
                       ? selectedTarget.google_204_enabled
-                        ? "Google 204"
-                        : "Google TLS 就绪"
+                        ? "HTTP 204"
+                        : "终点 TLS 就绪"
                       : "当前 TCP 延迟"}
                   </span>
                   <strong>{formatMs(selectedStats.current_ms, 1)}</strong>
@@ -3671,7 +3855,7 @@ export default function Home() {
                           <i
                             className={"target-dot tone-" + state.tone}
                             style={{
-                              borderColor: colorForIndex(index),
+                              borderColor: colorForIndex(index, theme),
                             }}
                             aria-hidden="true"
                           />
@@ -3730,10 +3914,6 @@ export default function Home() {
         </main>
 
         <footer className="desktop-statusbar">
-          <span className={"statusbar-connection connection-" + connection}>
-            <i aria-hidden="true" />
-            {connectionCopy}
-          </span>
           <span>
             {viewPaused
               ? "视图已暂停，后台采集仍在继续"

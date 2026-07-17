@@ -1,6 +1,6 @@
 # NetWatch service（桌面版 sidecar）
 
-轻量的本地 TCP 与代理节点质量监测服务。桌面版由 `NetWatch.exe` 启动它作为 `NetWatch.Service.exe` sidecar；服务固定监听 `127.0.0.1:9288`，不会暴露到局域网。节点模式经本地SOCKS5和当前代理节点建立Google TLS连接，可选继续验证HTTP 204，不自行实现具体代理协议。
+轻量的本地 TCP 与代理节点质量监测服务。桌面版由 `NetWatch.exe` 启动它作为 `NetWatch.Service.exe` sidecar；服务固定监听 `127.0.0.1:9288`，不会暴露到局域网。节点模式经本地SOCKS5和当前代理节点连接可配置TLS终点，默认`www.google.com:443`，可选继续验证HTTP 204，不自行实现具体代理协议。
 
 ## 运行
 
@@ -88,7 +88,7 @@ SSE 的 `snapshot` data 与上面完全相同；`sample` data 为 `{"sample": Sa
 }
 ```
 
-节点模式会强制TLS终点为`www.google.com:443`，代理地址只接受回环地址，探测间隔最低2秒。当前仅支持无需用户名和密码的SOCKS5入口；SOCKS5使用域名地址类型，把Google解析交给代理。`google_204_enabled`默认`false`，TLS握手和证书验证完成后即成功；设为`true`时才继续请求`/generate_204`，强制HTTP/1.1、禁用连接复用、添加随机查询参数并要求响应码严格等于204。
+节点模式的`host`和`port`是TLS测试终点；省略时默认`www.google.com:443`。代理地址只接受回环地址，探测间隔最低2秒。当前仅支持无需用户名和密码的SOCKS5入口；域名通过SOCKS5交给代理解析，IP按对应IPv4/IPv6地址类型发送。`google_204_enabled`字段名为兼容既有API而保留，默认`false`，TLS握手和证书验证完成后即成功；设为`true`时才继续请求所选终点的`/generate_204`，强制HTTP/1.1、禁用连接复用、添加随机查询参数并要求响应码严格等于204。修改终点、SOCKS5入口或该开关会清空目标的内存历史和动态延迟基准。
 
 `tunnel_ms`是SOCKS确认时间，部分代理核心可能在本机提前确认而使其接近0；`remote_first_byte_ms`记录TLS握手期间首次收到远端字节的时间，是更可靠的tcping风格指标。默认成功样本以`tls_ms`作为`latency_ms`且`stage`为`tls`；启用204后才增加`google_ms`/`http_status`，并以`google_ms`作为主延迟。节点网络超时仍使用通用`status: timeout`并由`stage: socks | tls | http`区分；本地代理、SOCKS、TLS证书和HTTP异常保留独立状态，同时作为非成功探测计入丢包率。
 

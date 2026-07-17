@@ -14,7 +14,10 @@ func TestConfigStoreRoundTripAndReplace(t *testing.T) {
 	if err != nil || exists || loaded != nil {
 		t.Fatalf("unexpected missing load: targets=%#v exists=%v err=%v", loaded, exists, err)
 	}
-	targets := []Target{{ID: "one", Name: "One", Kind: ProbeKindDirectTCP, Host: "127.0.0.1", Port: 443, IntervalMS: 1000, TimeoutMS: 500, Enabled: false}}
+	targets := []Target{
+		{ID: "one", Name: "One", Kind: ProbeKindDirectTCP, Host: "127.0.0.1", Port: 443, IntervalMS: 1000, TimeoutMS: 500, Enabled: false},
+		{ID: "node", Name: "Node", Kind: ProbeKindProxyGoogle, Host: "status.example", Port: 8443, ProxyHost: "127.0.0.1", ProxyPort: 10808, IntervalMS: 5000, TimeoutMS: 8000, Enabled: false},
+	}
 	if err := store.Save(targets); err != nil {
 		t.Fatalf("first save: %v", err)
 	}

@@ -44,10 +44,10 @@ func TestNormalizeAndValidateTarget(t *testing.T) {
 	}
 }
 
-func TestNormalizeProxyGoogleTarget(t *testing.T) {
+func TestNormalizeProxyNodeTarget(t *testing.T) {
 	target := Target{
 		ID: "node_1", Name: " Node ", Kind: ProbeKindProxyGoogle,
-		Host: "ignored.example", Port: 80,
+		Host: "status.example", Port: 8443,
 		ProxyHost: "127.0.0.1", ProxyPort: 10808,
 		Google204Enabled: true,
 		BypassTUN:        true, BypassInterfaceID: "physical-adapter",
@@ -57,8 +57,8 @@ func TestNormalizeProxyGoogleTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid node target rejected: %v", err)
 	}
-	if normalized.Host != GoogleProbeHost || normalized.Port != GoogleProbePort || normalized.Name != "Node" || !normalized.Google204Enabled {
-		t.Fatalf("Google endpoint was not normalized: %#v", normalized)
+	if normalized.Host != "status.example" || normalized.Port != 8443 || normalized.Name != "Node" || !normalized.Google204Enabled {
+		t.Fatalf("custom node endpoint was not preserved: %#v", normalized)
 	}
 	if normalized.BypassTUN || normalized.BypassInterfaceID != "" {
 		t.Fatalf("node target retained direct-only bypass settings: %#v", normalized)
@@ -67,6 +67,19 @@ func TestNormalizeProxyGoogleTarget(t *testing.T) {
 	tlsOnly.Google204Enabled = false
 	if sameProbeIdentity(normalized, tlsOnly) {
 		t.Fatal("changing the terminal probe stage did not change probe identity")
+	}
+	otherEndpoint := normalized
+	otherEndpoint.Host = "other.example"
+	if sameProbeIdentity(normalized, otherEndpoint) {
+		t.Fatal("changing the node endpoint did not change probe identity")
+	}
+
+	defaults := target
+	defaults.Host = ""
+	defaults.Port = 0
+	defaulted, err := normalizeAndValidateTarget(defaults)
+	if err != nil || defaulted.Host != GoogleProbeHost || defaulted.Port != GoogleProbePort {
+		t.Fatalf("default Google endpoint was not applied: %#v %v", defaulted, err)
 	}
 
 	invalid := target
@@ -77,7 +90,17 @@ func TestNormalizeProxyGoogleTarget(t *testing.T) {
 	invalid = target
 	invalid.IntervalMS = minNodeIntervalMS - 1
 	if _, err := normalizeAndValidateTarget(invalid); err == nil {
-		t.Fatal("overly frequent Google probe was accepted")
+		t.Fatal("overly frequent node probe was accepted")
+	}
+	invalid = target
+	invalid.Host = "https://status.example"
+	if _, err := normalizeAndValidateTarget(invalid); err == nil {
+		t.Fatal("invalid node endpoint host was accepted")
+	}
+	invalid = target
+	invalid.Port = 65536
+	if _, err := normalizeAndValidateTarget(invalid); err == nil {
+		t.Fatal("invalid node endpoint port was accepted")
 	}
 }
 

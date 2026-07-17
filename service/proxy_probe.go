@@ -13,11 +13,12 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
-const maxGoogleResponseHeaderBytes = 16 * 1024
+const maxNodeResponseHeaderBytes = 16 * 1024
 
 type googleProbeConfig struct {
 	Host      string
@@ -42,12 +43,19 @@ func probeTargetOnce(parent context.Context, target Target) Sample {
 }
 
 func probeGoogleViaSOCKS5(parent context.Context, target Target) Sample {
+	host := strings.TrimPrefix(strings.TrimSuffix(strings.TrimSpace(target.Host), "]"), "[")
+	if host == "" {
+		host = GoogleProbeHost
+	}
+	port := target.Port
+	if port == 0 {
+		port = GoogleProbePort
+	}
 	return probeGoogleViaSOCKS5WithConfig(parent, target, googleProbeConfig{
-		Host: GoogleProbeHost,
-		Port: GoogleProbePort,
+		Host: host,
+		Port: port,
 		Path: GoogleProbePath,
 		TLSConfig: &tls.Config{
-			ServerName: GoogleProbeHost,
 			MinVersion: tls.VersionTLS12,
 			NextProtos: []string{"http/1.1"},
 		},
@@ -56,6 +64,7 @@ func probeGoogleViaSOCKS5(parent context.Context, target Target) Sample {
 }
 
 func probeGoogleViaSOCKS5WithConfig(parent context.Context, target Target, config googleProbeConfig) Sample {
+	config.Host = strings.TrimPrefix(strings.TrimSuffix(strings.TrimSpace(config.Host), "]"), "[")
 	ctx, cancel := context.WithTimeout(parent, time.Duration(target.TimeoutMS)*time.Millisecond)
 	defer cancel()
 	started := time.Now()
@@ -139,10 +148,14 @@ func probeGoogleViaSOCKS5WithConfig(parent context.Context, target Target, confi
 		nonce = config.Nonce()
 	}
 	requestPath := config.Path + "?netwatch=" + nonce
+	requestHost := config.Host
+	if config.Port != GoogleProbePort || strings.Contains(config.Host, ":") {
+		requestHost = net.JoinHostPort(config.Host, strconv.Itoa(config.Port))
+	}
 	request := fmt.Sprintf(
 		"GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: NetWatch/0.3\r\nAccept: */*\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
 		requestPath,
-		config.Host,
+		requestHost,
 	)
 	if _, err := io.WriteString(tlsConnection, request); err != nil {
 		status := StatusHTTPError
@@ -152,7 +165,7 @@ func probeGoogleViaSOCKS5WithConfig(parent context.Context, target Target, confi
 		return finishNodeFailure(sample, time.Now(), status, err)
 	}
 
-	limited := io.LimitReader(tlsConnection, maxGoogleResponseHeaderBytes+1)
+	limited := io.LimitReader(tlsConnection, maxNodeResponseHeaderBytes+1)
 	reader := bufio.NewReaderSize(limited, 4096)
 	response, err := http.ReadResponse(reader, &http.Request{Method: http.MethodGet})
 	if err != nil {
@@ -169,7 +182,7 @@ func probeGoogleViaSOCKS5WithConfig(parent context.Context, target Target, confi
 			sample,
 			time.Now(),
 			StatusUnexpectedHTTP,
-			fmt.Errorf("Google probe returned HTTP %d instead of 204", response.StatusCode),
+			fmt.Errorf("probe endpoint returned HTTP %d instead of 204", response.StatusCode),
 		)
 	}
 
@@ -197,6 +210,7 @@ func (connection *firstReadConn) Read(buffer []byte) (int, error) {
 }
 
 func socks5Connect(connection net.Conn, host string, port int) (string, error) {
+	host = strings.TrimPrefix(strings.TrimSuffix(strings.TrimSpace(host), "]"), "[")
 	if len(host) == 0 || len(host) > 255 {
 		return StatusSOCKSProtocol, errors.New("SOCKS5 target host must be 1 to 255 bytes")
 	}
@@ -215,8 +229,19 @@ func socks5Connect(connection net.Conn, host string, port int) (string, error) {
 	}
 
 	request := make([]byte, 0, 7+len(host))
-	request = append(request, 0x05, 0x01, 0x00, 0x03, byte(len(host)))
-	request = append(request, host...)
+	request = append(request, 0x05, 0x01, 0x00)
+	if ip := net.ParseIP(host); ip != nil {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			request = append(request, 0x01)
+			request = append(request, ipv4...)
+		} else {
+			request = append(request, 0x04)
+			request = append(request, ip.To16()...)
+		}
+	} else {
+		request = append(request, 0x03, byte(len(host)))
+		request = append(request, host...)
+	}
 	request = append(request, byte(port>>8), byte(port))
 	if _, err := connection.Write(request); err != nil {
 		return StatusSOCKSProtocol, fmt.Errorf("write SOCKS5 CONNECT: %w", err)

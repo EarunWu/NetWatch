@@ -93,15 +93,27 @@ func TestGoogleProbeDefaultsToTLSOnly(t *testing.T) {
 	}
 }
 
-func TestGoogleProbeClassifiesSOCKSRejection(t *testing.T) {
-	host, port := startSOCKS5Responder(t, func(connection net.Conn) {
-		readSOCKS5Request(t, connection)
-		_, _ = connection.Write([]byte{0x05, 0x05, 0x00, 0x01, 127, 0, 0, 1, 0, 0})
-	})
-	target := Target{ID: "rejected", Kind: ProbeKindProxyGoogle, ProxyHost: host, ProxyPort: port, TimeoutMS: 1000}
-	sample := probeGoogleViaSOCKS5(context.Background(), target)
-	if sample.Status != StatusSOCKSRejected || sample.Stage != StageSOCKS || sample.LocalProxy == nil || sample.Tunnel != nil {
-		t.Fatalf("unexpected rejected sample: %#v", sample)
+func TestGoogleProbeUsesConfiguredSOCKSEndpoint(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+	}{
+		{name: "domain", host: "status.example"},
+		{name: "IPv4", host: "192.0.2.10"},
+		{name: "IPv6", host: "2001:db8::10"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			proxyHost, proxyPort := startSOCKS5Responder(t, func(connection net.Conn) {
+				readSOCKS5Request(t, connection, test.host, 8443)
+				_, _ = connection.Write([]byte{0x05, 0x05, 0x00, 0x01, 127, 0, 0, 1, 0, 0})
+			})
+			target := Target{ID: "rejected", Kind: ProbeKindProxyGoogle, Host: test.host, Port: 8443, ProxyHost: proxyHost, ProxyPort: proxyPort, TimeoutMS: 1000}
+			sample := probeGoogleViaSOCKS5(context.Background(), target)
+			if sample.Status != StatusSOCKSRejected || sample.Stage != StageSOCKS || sample.LocalProxy == nil || sample.Tunnel != nil {
+				t.Fatalf("unexpected rejected sample: %#v", sample)
+			}
+		})
 	}
 }
 
@@ -135,7 +147,7 @@ func TestGoogleProbeClassifiesLocalProxyRefusal(t *testing.T) {
 func startForwardingSOCKS5(t *testing.T, upstreamAddress string) (string, int) {
 	t.Helper()
 	return startSOCKS5Responder(t, func(client net.Conn) {
-		readSOCKS5Request(t, client)
+		readSOCKS5Request(t, client, GoogleProbeHost, GoogleProbePort)
 		upstream, err := net.Dial("tcp", upstreamAddress)
 		if err != nil {
 			t.Errorf("dial test endpoint: %v", err)
@@ -172,7 +184,7 @@ func startSOCKS5Responder(t *testing.T, responder func(net.Conn)) (string, int) 
 	return address.IP.String(), address.Port
 }
 
-func readSOCKS5Request(t *testing.T, connection net.Conn) string {
+func readSOCKS5Request(t *testing.T, connection net.Conn, expectedHost string, expectedPort int) string {
 	t.Helper()
 	greeting := make([]byte, 3)
 	if _, err := io.ReadFull(connection, greeting); err != nil {
@@ -187,18 +199,45 @@ func readSOCKS5Request(t *testing.T, connection net.Conn) string {
 		t.Errorf("write SOCKS5 method: %v", err)
 		return ""
 	}
-	header := make([]byte, 5)
+	header := make([]byte, 4)
 	if _, err := io.ReadFull(connection, header); err != nil {
 		t.Errorf("read SOCKS5 request: %v", err)
 		return ""
 	}
-	if header[0] != 0x05 || header[1] != 0x01 || header[3] != 0x03 {
+	if header[0] != 0x05 || header[1] != 0x01 {
 		t.Errorf("unexpected SOCKS5 CONNECT header: %v", header)
 		return ""
 	}
-	host := make([]byte, int(header[4]))
-	if _, err := io.ReadFull(connection, host); err != nil {
-		t.Errorf("read SOCKS5 target host: %v", err)
+	var host string
+	switch header[3] {
+	case 0x01:
+		address := make([]byte, net.IPv4len)
+		if _, err := io.ReadFull(connection, address); err != nil {
+			t.Errorf("read SOCKS5 IPv4 target: %v", err)
+			return ""
+		}
+		host = net.IP(address).String()
+	case 0x04:
+		address := make([]byte, net.IPv6len)
+		if _, err := io.ReadFull(connection, address); err != nil {
+			t.Errorf("read SOCKS5 IPv6 target: %v", err)
+			return ""
+		}
+		host = net.IP(address).String()
+	case 0x03:
+		length := []byte{0}
+		if _, err := io.ReadFull(connection, length); err != nil {
+			t.Errorf("read SOCKS5 target host length: %v", err)
+			return ""
+		}
+		address := make([]byte, int(length[0]))
+		if _, err := io.ReadFull(connection, address); err != nil {
+			t.Errorf("read SOCKS5 target host: %v", err)
+			return ""
+		}
+		host = string(address)
+	default:
+		t.Errorf("unexpected SOCKS5 address type: 0x%02x", header[3])
 		return ""
 	}
 	port := make([]byte, 2)
@@ -206,11 +245,11 @@ func readSOCKS5Request(t *testing.T, connection net.Conn) string {
 		t.Errorf("read SOCKS5 target port: %v", err)
 		return ""
 	}
-	if string(host) != GoogleProbeHost {
-		t.Errorf("unexpected SOCKS5 target: %s", string(host))
+	if host != expectedHost {
+		t.Errorf("unexpected SOCKS5 target: %s", host)
 	}
-	if int(port[0])<<8|int(port[1]) != GoogleProbePort {
+	if int(port[0])<<8|int(port[1]) != expectedPort {
 		t.Errorf("unexpected SOCKS5 target port: %s", strconv.Itoa(int(port[0])<<8|int(port[1])))
 	}
-	return strings.TrimSpace(string(host))
+	return strings.TrimSpace(host)
 }

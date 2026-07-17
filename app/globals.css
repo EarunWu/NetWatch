@@ -27,6 +27,30 @@
   color-scheme: dark;
 }
 
+:root[data-theme="light"],
+.desktop-app[data-theme="light"] {
+  --bg: #eef3f8;
+  --bg-elevated: #ffffff;
+  --surface: #ffffff;
+  --surface-soft: #f5f8fc;
+  --surface-hover: #eaf1f8;
+  --border: rgba(53, 72, 96, 0.15);
+  --border-strong: rgba(53, 72, 96, 0.27);
+  --text: #172335;
+  --text-soft: #33445a;
+  --muted: #607087;
+  --text-dim: #718096;
+  --blue: #1677d2;
+  --blue-strong: #0f68bd;
+  --green: #078564;
+  --orange: #b86b00;
+  --red: #cf3558;
+  --violet: #7655c7;
+  --shadow: 0 16px 42px rgba(44, 62, 82, 0.1);
+  --focus: #006fd6;
+  color-scheme: light;
+}
+
 * {
   box-sizing: border-box;
 }

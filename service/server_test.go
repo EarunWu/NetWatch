@@ -240,12 +240,12 @@ func TestAPIRejectsUnknownJSONField(t *testing.T) {
 	}
 }
 
-func TestAPICreatesGoogleNodeProbe(t *testing.T) {
+func TestAPICreatesCustomNodeProbe(t *testing.T) {
 	monitor, server := testServer(t)
 	defer monitor.Close()
 	target := Target{
 		Name: "Current Proxy Node", Kind: ProbeKindProxyGoogle,
-		Host: "ignored.example", Port: 80,
+		Host: "status.example", Port: 8443,
 		ProxyHost: "127.0.0.1", ProxyPort: 10808,
 		Google204Enabled: true,
 		IntervalMS:       5000, TimeoutMS: 8000, Enabled: false,
@@ -262,7 +262,7 @@ func TestAPICreatesGoogleNodeProbe(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.Kind != ProbeKindProxyGoogle || created.Host != GoogleProbeHost || created.Port != GoogleProbePort || created.ProxyPort != 10808 || !created.Google204Enabled {
+	if created.Kind != ProbeKindProxyGoogle || created.Host != "status.example" || created.Port != 8443 || created.ProxyPort != 10808 || !created.Google204Enabled {
 		t.Fatalf("node probe was not normalized: %#v", created)
 	}
 }

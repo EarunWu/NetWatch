@@ -213,3 +213,37 @@ test("直连与节点折线都保留实时尖峰测量", async (context) => {
   assert.equal(series[0].points[0].value, 500);
   assert.equal(series[1].points[0].value, 500);
 });
+
+test("主题偏好只接受浅色并安全回退到深色", async (context) => {
+  const vite = await createServer({
+    appType: "custom",
+    logLevel: "silent",
+    server: { middlewareMode: true },
+  });
+  context.after(() => vite.close());
+
+  const { __testing } = await vite.ssrLoadModule("/app/page.tsx");
+  assert.equal(__testing.normalizeThemePreference("light"), "light");
+  assert.equal(__testing.normalizeThemePreference("dark"), "dark");
+  assert.equal(__testing.normalizeThemePreference("system"), "dark");
+  assert.equal(
+    __testing.loadThemePreference({ getItem: () => "light" }),
+    "light",
+  );
+  assert.equal(
+    __testing.loadThemePreference({
+      getItem: () => {
+        throw new Error("storage unavailable");
+      },
+    }),
+    "dark",
+  );
+
+  let saved = "";
+  __testing.saveThemePreference("light", {
+    setItem: (_key, value) => {
+      saved = value;
+    },
+  });
+  assert.equal(saved, "light");
+});
