@@ -131,6 +131,30 @@ type LossEvent = {
   bucketMs: number;
 };
 
+type VisibleChartSummary = {
+  pointCount: number;
+  eventCount: number;
+  maxValue: number;
+};
+
+type ChartDataCacheEntry = {
+  target: Target;
+  samples: Sample[];
+  colorIndex: number;
+  theme: AppTheme;
+  series: ChartSeries[];
+  events: LossEvent[];
+};
+
+type StatsCacheEntry = {
+  target: Target;
+  samples: Sample[];
+  buckets: ChartBucket[];
+  rangeMs: number;
+  anchor: number;
+  stats: TargetStats;
+};
+
 type TargetState = {
   tone: "good" | "warning" | "danger" | "muted";
   label: string;
@@ -183,6 +207,13 @@ const SERVICE_UNAVAILABLE_MESSAGE =
   "无法连接本地监测核心（127.0.0.1:9288）。服务可能仍在启动、正在重启，或连接被系统网络策略阻止。";
 const VIEW_PREFERENCES_KEY = "netwatch.desktop-view.v1";
 const THEME_PREFERENCE_KEY = "netwatch.theme.v1";
+const SSE_SAMPLE_FLUSH_MS = 200;
+const MAX_DRAW_EVENTS_PER_PIXEL = 8;
+const FULL_RESOLUTION_SERIES_BUDGET = 4;
+const EMPTY_SAMPLES: Sample[] = [];
+const EMPTY_CHART_BUCKETS: ChartBucket[] = [];
+const TARGET_CHART_CACHE = new WeakMap<Sample[], ChartDataCacheEntry>();
+const TARGET_STATS_CACHE = new WeakMap<Sample[], StatsCacheEntry>();
 
 const SERIES_COLORS: Record<AppTheme, string[]> = {
   dark: [
@@ -830,11 +861,17 @@ function mergeSamples(
     grouped.set(sample.target_id, group);
   });
   grouped.forEach((samples, targetId) => {
-    const combined = [...(next[targetId] ?? []), ...samples].sort(
-      (a, b) => a.ts - b.ts,
-    );
+    const existing = next[targetId] ?? EMPTY_SAMPLES;
+    samples.sort((left, right) => left.ts - right.ts);
+    const alreadyOrdered =
+      existing.length === 0 ||
+      samples.length === 0 ||
+      existing[existing.length - 1].ts <= samples[0].ts;
+    const combined = alreadyOrdered
+      ? [...existing, ...samples]
+      : [...existing, ...samples].sort((left, right) => left.ts - right.ts);
     const deduplicated: Sample[] = [];
-    let lastKey = "";
+    const seen = new Set<string>();
     combined.forEach((sample) => {
       const key =
         sample.ts +
@@ -844,8 +881,10 @@ function mergeSamples(
         (sample.latency_ms === null ? "" : sample.latency_ms) +
         "|" +
         sample.stage;
-      if (key !== lastKey) deduplicated.push(sample);
-      lastKey = key;
+      if (!seen.has(key)) {
+        seen.add(key);
+        deduplicated.push(sample);
+      }
     });
     next[targetId] = deduplicated.slice(-3000);
   });
@@ -1017,17 +1056,77 @@ function deriveStats(
   };
 }
 
+function deriveStatsForWindowCached(
+  target: Target,
+  samples: Sample[],
+  buckets: ChartBucket[],
+  rangeMs: number,
+  anchor: number,
+): TargetStats {
+  const cached =
+    samples === EMPTY_SAMPLES ? undefined : TARGET_STATS_CACHE.get(samples);
+  if (
+    cached?.target === target &&
+    cached.buckets === buckets &&
+    cached.rangeMs === rangeMs &&
+    cached.anchor === anchor
+  ) {
+    return cached.stats;
+  }
+  const windowStart = anchor - rangeMs;
+  const windowSamples = samples.filter(
+    (sample) =>
+      sample.bucket_ms === 0 &&
+      sample.ts >= windowStart &&
+      sample.ts <= anchor,
+  );
+  const windowBuckets = buckets.filter(
+    (bucket) =>
+      bucket.start_ms >= windowStart &&
+      bucket.start_ms + bucket.duration_ms <= anchor,
+  );
+  const stats = deriveStats(
+    windowSamples,
+    windowBuckets,
+    target.kind === "proxy_google",
+  );
+  if (samples !== EMPTY_SAMPLES) {
+    TARGET_STATS_CACHE.set(samples, {
+      target,
+      samples,
+      buckets,
+      rangeMs,
+      anchor,
+      stats,
+    });
+  }
+  return stats;
+}
+
 // 仅供前端统计回归测试使用；生产界面仍只使用默认导出的页面组件。
 // eslint-disable-next-line react-refresh/only-export-components
 export const __testing = {
   deriveStats,
   buildLatencySeries,
   buildLossEvents,
+  downsampleChartPoints,
   lossStatusLabel,
+  mergeSamples,
   normalizeThemePreference,
   loadThemePreference,
   saveThemePreference,
+  summarizeVisibleChartData,
 };
+
+function latestSampleAtOrBefore(
+  samples: Sample[],
+  timestamp: number,
+): Sample | undefined {
+  for (let index = samples.length - 1; index >= 0; index -= 1) {
+    if (samples[index].ts <= timestamp) return samples[index];
+  }
+  return undefined;
+}
 
 function getTargetState(
   target: Target,
@@ -1295,43 +1394,56 @@ function buildLatencySeries(
 ): ChartSeries[] {
   return targets.flatMap((target, index) => {
     if (visible[target.id] === false) return [];
-    const samples = samplesByTarget[target.id] ?? [];
-    if (target.kind === "proxy_google") {
-      return [
-        {
-          id: target.id + ":tls-complete",
-          name: target.name + " · TLS完成",
-          color: colorForIndex(index, theme),
-          intervalMs: target.interval_ms,
-          dash: [],
-          points: samples.map((sample) => ({
-            ts: sample.ts,
-            value:
-              sample.bucket_ms > 0 && statusKind(sample.status) !== "success"
-                ? null
-                : sample.tls_ms,
-            bucketMs: sample.bucket_ms,
-          })),
-        },
-      ];
-    }
+    return buildTargetLatencySeries(
+      target,
+      samplesByTarget[target.id] ?? EMPTY_SAMPLES,
+      index,
+      theme,
+    );
+  });
+}
+
+function buildTargetLatencySeries(
+  target: Target,
+  samples: Sample[],
+  colorIndex: number,
+  theme: AppTheme,
+): ChartSeries[] {
+  if (target.kind === "proxy_google") {
     return [
       {
-        id: target.id,
-        name: target.name,
-        color: colorForIndex(index, theme),
+        id: target.id + ":tls-complete",
+        name: target.name + " · TLS完成",
+        color: colorForIndex(colorIndex, theme),
         intervalMs: target.interval_ms,
+        dash: [],
         points: samples.map((sample) => ({
           ts: sample.ts,
-          bucketMs: sample.bucket_ms,
           value:
             sample.bucket_ms > 0 && statusKind(sample.status) !== "success"
               ? null
-              : sample.latency_ms,
+              : sample.tls_ms,
+          bucketMs: sample.bucket_ms,
         })),
       },
     ];
-  });
+  }
+  return [
+    {
+      id: target.id,
+      name: target.name,
+      color: colorForIndex(colorIndex, theme),
+      intervalMs: target.interval_ms,
+      points: samples.map((sample) => ({
+        ts: sample.ts,
+        bucketMs: sample.bucket_ms,
+        value:
+          sample.bucket_ms > 0 && statusKind(sample.status) !== "success"
+            ? null
+            : sample.latency_ms,
+      })),
+    },
+  ];
 }
 
 function probeStageLabel(stage: string): string {
@@ -1401,44 +1513,82 @@ function buildLossEvents(
 ): LossEvent[] {
   return targets.flatMap((target, targetIndex) => {
     if (visible[target.id] === false) return [];
-    return (samplesByTarget[target.id] ?? []).flatMap(
-      (sample, sampleIndex): LossEvent[] => {
-        if (statusKind(sample.status) === "success") return [];
-        const estimated = sample.loss_reason === "latency_spike";
-        const measuredValue = estimated
-          ? target.kind === "proxy_google"
-            ? sample.tls_ms
-            : sample.latency_ms
-          : null;
-        return [
-          {
-            id:
-              target.id + ":loss:" + sample.ts + ":" + sampleIndex,
-            name: target.name,
-            color: colorForIndex(targetIndex, theme),
-            markerColor:
-              theme === "light"
-                ? estimated
-                  ? "#b86b00"
-                  : "#cf3558"
-                : estimated
-                  ? "#f7b84b"
-                  : "#ff748c",
-            kind: estimated ? "estimated" : "failure",
-            value:
-              measuredValue !== null && Number.isFinite(measuredValue)
-                ? measuredValue
-                : null,
-            ts: sample.ts,
-            stage: probeStageLabel(sample.stage),
-            status: sample.status,
-            lossReason: sample.loss_reason,
-            bucketMs: sample.bucket_ms,
-          },
-        ];
-      },
+    return buildTargetLossEvents(
+      target,
+      samplesByTarget[target.id] ?? EMPTY_SAMPLES,
+      targetIndex,
+      theme,
     );
   });
+}
+
+function buildTargetLossEvents(
+  target: Target,
+  samples: Sample[],
+  colorIndex: number,
+  theme: AppTheme,
+): LossEvent[] {
+  return samples.flatMap((sample, sampleIndex): LossEvent[] => {
+    if (statusKind(sample.status) === "success") return [];
+    const estimated = sample.loss_reason === "latency_spike";
+    const measuredValue = estimated
+      ? target.kind === "proxy_google"
+        ? sample.tls_ms
+        : sample.latency_ms
+      : null;
+    return [
+      {
+        id: target.id + ":loss:" + sample.ts + ":" + sampleIndex,
+        name: target.name,
+        color: colorForIndex(colorIndex, theme),
+        markerColor:
+          theme === "light"
+            ? estimated
+              ? "#b86b00"
+              : "#cf3558"
+            : estimated
+              ? "#f7b84b"
+              : "#ff748c",
+        kind: estimated ? "estimated" : "failure",
+        value:
+          measuredValue !== null && Number.isFinite(measuredValue)
+            ? measuredValue
+            : null,
+        ts: sample.ts,
+        stage: probeStageLabel(sample.stage),
+        status: sample.status,
+        lossReason: sample.loss_reason,
+        bucketMs: sample.bucket_ms,
+      },
+    ];
+  });
+}
+
+function buildTargetChartDataCached(
+  target: Target,
+  samples: Sample[],
+  colorIndex: number,
+  theme: AppTheme,
+): ChartDataCacheEntry {
+  const cached =
+    samples === EMPTY_SAMPLES ? undefined : TARGET_CHART_CACHE.get(samples);
+  if (
+    cached?.target === target &&
+    cached.colorIndex === colorIndex &&
+    cached.theme === theme
+  ) {
+    return cached;
+  }
+  const entry: ChartDataCacheEntry = {
+    target,
+    samples,
+    colorIndex,
+    theme,
+    series: buildTargetLatencySeries(target, samples, colorIndex, theme),
+    events: buildTargetLossEvents(target, samples, colorIndex, theme),
+  };
+  if (samples !== EMPTY_SAMPLES) TARGET_CHART_CACHE.set(samples, entry);
+  return entry;
 }
 
 function TargetModal({
@@ -1994,6 +2144,216 @@ function isChartDatumInWindow(
   return bucketStart >= start && bucketStart + bucketMS <= end;
 }
 
+function summarizeVisibleChartData(
+  series: ChartSeries[],
+  events: LossEvent[],
+  start: number,
+  end: number,
+): VisibleChartSummary {
+  let pointCount = 0;
+  let eventCount = 0;
+  let maxValue = 0;
+  series.forEach((item) => {
+    item.points.forEach((point) => {
+      if (
+        point.value === null ||
+        !Number.isFinite(point.value) ||
+        !isChartDatumInWindow(point.ts, point.bucketMs, start, end)
+      ) {
+        return;
+      }
+      pointCount += 1;
+      if (point.value > maxValue) maxValue = point.value;
+    });
+  });
+  events.forEach((event) => {
+    if (!isChartDatumInWindow(event.ts, event.bucketMs, start, end)) return;
+    eventCount += 1;
+    if (
+      event.value !== null &&
+      Number.isFinite(event.value) &&
+      event.value > maxValue
+    ) {
+      maxValue = event.value;
+    }
+  });
+  return { pointCount, eventCount, maxValue };
+}
+
+type OrderedChartPoint = {
+  point: ChartPoint;
+  order: number;
+};
+
+type ChartPixelBucket = {
+  first?: OrderedChartPoint;
+  last?: OrderedChartPoint;
+  min?: OrderedChartPoint;
+  max?: OrderedChartPoint;
+  firstGap?: OrderedChartPoint;
+  lastGap?: OrderedChartPoint;
+};
+
+function downsampleChartPoints(
+  points: ChartPoint[],
+  start: number,
+  end: number,
+  intervalMs: number,
+  pixelWidth: number,
+): ChartPoint[] {
+  const bucketCount = Math.max(1, Math.ceil(pixelWidth));
+  const buckets: Array<ChartPixelBucket | undefined> = new Array(bucketCount);
+  const span = Math.max(1, end - start);
+  const rawStart = start - Math.max(0, intervalMs * 2);
+
+  points.forEach((point, order) => {
+    const visible =
+      point.bucketMs > 0
+        ? isChartDatumInWindow(point.ts, point.bucketMs, start, end)
+        : point.ts >= rawStart && point.ts <= end;
+    if (!visible) return;
+
+    const ratio = Math.max(0, Math.min(1, (point.ts - start) / span));
+    const bucketIndex = Math.min(
+      bucketCount - 1,
+      Math.floor(ratio * bucketCount),
+    );
+    const bucket = buckets[bucketIndex] ?? {};
+    buckets[bucketIndex] = bucket;
+    const candidate = { point, order };
+
+    if (point.value === null || !Number.isFinite(point.value)) {
+      bucket.firstGap ??= candidate;
+      bucket.lastGap = candidate;
+      return;
+    }
+
+    bucket.first ??= candidate;
+    bucket.last = candidate;
+    if (!bucket.min || point.value < (bucket.min.point.value ?? Infinity)) {
+      bucket.min = candidate;
+    }
+    if (!bucket.max || point.value > (bucket.max.point.value ?? -Infinity)) {
+      bucket.max = candidate;
+    }
+  });
+
+  const reduced: ChartPoint[] = [];
+  buckets.forEach((bucket) => {
+    if (!bucket) return;
+    const unique = new Map<number, OrderedChartPoint>();
+    [
+      bucket.first,
+      bucket.min,
+      bucket.max,
+      bucket.last,
+      bucket.firstGap,
+      bucket.lastGap,
+    ].forEach((candidate) => {
+      if (candidate) unique.set(candidate.order, candidate);
+    });
+    Array.from(unique.values())
+      .sort(
+        (left, right) =>
+          left.point.ts - right.point.ts || left.order - right.order,
+      )
+      .forEach((candidate) => reduced.push(candidate.point));
+  });
+  return reduced;
+}
+
+function selectLossEventsForDraw(
+  events: LossEvent[],
+  start: number,
+  end: number,
+  pixelWidth: number,
+): LossEvent[] {
+  const bucketCount = Math.max(1, Math.ceil(pixelWidth));
+  const span = Math.max(1, end - start);
+  const buckets: LossEvent[][] = Array.from(
+    { length: bucketCount },
+    () => [],
+  );
+  events.forEach((event) => {
+    if (!isChartDatumInWindow(event.ts, event.bucketMs, start, end)) return;
+    const ratio = Math.max(0, Math.min(1, (event.ts - start) / span));
+    const bucketIndex = Math.min(
+      bucketCount - 1,
+      Math.floor(ratio * bucketCount),
+    );
+    const bucket = buckets[bucketIndex];
+    if (bucket.length < MAX_DRAW_EVENTS_PER_PIXEL) bucket.push(event);
+  });
+  return buckets.flat();
+}
+
+function lowerBoundTimestamp<T extends { ts: number }>(
+  values: T[],
+  timestamp: number,
+): number {
+  let low = 0;
+  let high = values.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (values[middle].ts < timestamp) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function nearestVisibleChartPoint(
+  points: ChartPoint[],
+  timestamp: number,
+  start: number,
+  end: number,
+): { point: ChartPoint | null; distance: number } {
+  let left = lowerBoundTimestamp(points, timestamp) - 1;
+  let right = left + 1;
+  let nearest: ChartPoint | null = null;
+  let distance = Number.POSITIVE_INFINITY;
+  while (left >= 0 || right < points.length) {
+    const leftDistance =
+      left >= 0 ? Math.abs(points[left].ts - timestamp) : Infinity;
+    const rightDistance =
+      right < points.length ? Math.abs(points[right].ts - timestamp) : Infinity;
+    if (Math.min(leftDistance, rightDistance) > distance) break;
+    const useLeft = leftDistance <= rightDistance;
+    const candidate = useLeft ? points[left--] : points[right++];
+    if (
+      isChartDatumInWindow(candidate.ts, candidate.bucketMs, start, end) &&
+      Math.abs(candidate.ts - timestamp) < distance
+    ) {
+      nearest = candidate;
+      distance = Math.abs(candidate.ts - timestamp);
+    }
+  }
+  return { point: nearest, distance };
+}
+
+function nearbyLossEvents(
+  events: LossEvent[],
+  timestamp: number,
+  start: number,
+  end: number,
+  tolerance: number,
+): LossEvent[] {
+  const matches: LossEvent[] = [];
+  for (
+    let index = lowerBoundTimestamp(events, timestamp - tolerance);
+    index < events.length && events[index].ts <= timestamp + tolerance;
+    index += 1
+  ) {
+    const event = events[index];
+    if (isChartDatumInWindow(event.ts, event.bucketMs, start, end)) {
+      matches.push(event);
+    }
+  }
+  return matches.sort(
+    (left, right) =>
+      Math.abs(left.ts - timestamp) - Math.abs(right.ts - timestamp),
+  );
+}
+
 function CanvasChart({
   series,
   events,
@@ -2012,35 +2372,15 @@ function CanvasChart({
   const yMaxRef = useRef(100);
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
 
-  const visiblePoints = useMemo(
+  const visibleSummary = useMemo(
     () =>
-      series.flatMap((item) =>
-        item.points.filter(
-          (point) =>
-            isChartDatumInWindow(
-              point.ts,
-              point.bucketMs,
-              anchorTime - windowMs,
-              anchorTime,
-            ) &&
-            point.value !== null,
-        ),
+      summarizeVisibleChartData(
+        series,
+        events,
+        anchorTime - windowMs,
+        anchorTime,
       ),
-    [series, anchorTime, windowMs],
-  );
-
-  const visibleEvents = useMemo(
-    () =>
-      events.filter(
-        (event) =>
-          isChartDatumInWindow(
-            event.ts,
-            event.bucketMs,
-            anchorTime - windowMs,
-            anchorTime,
-          ),
-      ),
-    [events, anchorTime, windowMs],
+    [anchorTime, events, series, windowMs],
   );
 
   const draw = useCallback(() => {
@@ -2074,12 +2414,14 @@ function CanvasChart({
     };
     const start = anchorTime - windowMs;
     const chartColors = CHART_THEME_COLORS[theme];
-
-    const observedMax = Math.max(
-      0,
-      ...visiblePoints.map((point) => point.value ?? 0),
-      ...visibleEvents.map((event) => event.value ?? 0),
+    const drawEvents = selectLossEventsForDraw(
+      events,
+      start,
+      anchorTime,
+      plot.width,
     );
+
+    const observedMax = visibleSummary.maxValue;
     const desired = niceCeiling(Math.max(40, observedMax * 1.16));
     if (
       desired > yMaxRef.current ||
@@ -2138,18 +2480,25 @@ function CanvasChart({
     context.rect(plot.x, plot.y, plot.width, plot.height);
     context.clip();
 
+    // Keep the total draw workload bounded when many targets are visible. A
+    // small number of series gets one bucket per CSS pixel; larger overlays
+    // share the same horizontal bucket budget while still retaining peaks,
+    // valleys, endpoints and gap markers.
+    const perSeriesPixelWidth = Math.max(
+      32,
+      plot.width /
+        Math.max(
+          1,
+          Math.ceil(series.length / FULL_RESOLUTION_SERIES_BUDGET),
+        ),
+    );
     series.forEach((item, seriesIndex) => {
-      const points = item.points.filter(
-        (point) =>
-          point.bucketMs > 0
-            ? isChartDatumInWindow(
-                point.ts,
-                point.bucketMs,
-                start,
-                anchorTime,
-              )
-            : point.ts >= start - item.intervalMs * 2 &&
-              point.ts <= anchorTime,
+      const points = downsampleChartPoints(
+        item.points,
+        start,
+        anchorTime,
+        item.intervalMs,
+        perSeriesPixelWidth,
       );
       context.beginPath();
       context.strokeStyle = item.color;
@@ -2218,7 +2567,7 @@ function CanvasChart({
     context.restore();
 
     const eventStacks = new Map<number, number>();
-    visibleEvents.forEach((event) => {
+    drawEvents.forEach((event) => {
       const x = xFor(event.ts);
       if (event.kind === "estimated" && event.value !== null) {
         const y = yFor(event.value);
@@ -2247,7 +2596,7 @@ function CanvasChart({
       context.stroke();
     });
 
-    if (visiblePoints.length === 0 && visibleEvents.length === 0) {
+    if (visibleSummary.pointCount === 0 && visibleSummary.eventCount === 0) {
       context.fillStyle = chartColors.empty;
       context.font = "600 14px system-ui, sans-serif";
       context.textAlign = "center";
@@ -2257,7 +2606,7 @@ function CanvasChart({
         plot.y + plot.height / 2,
       );
     }
-  }, [anchorTime, series, theme, visibleEvents, visiblePoints, windowMs]);
+  }, [anchorTime, events, series, theme, visibleSummary, windowMs]);
 
   useEffect(() => {
     draw();
@@ -2271,30 +2620,16 @@ function CanvasChart({
   const updateTooltip = useCallback(
     (timestamp: number, x: number, width: number) => {
       const latencyRows = series.map((item) => {
-        let nearest: ChartPoint | null = null;
-        let distance = Number.POSITIVE_INFINITY;
-        for (let index = item.points.length - 1; index >= 0; index -= 1) {
-          const point = item.points[index];
-          if (
-            !isChartDatumInWindow(
-              point.ts,
-              point.bucketMs,
-              anchorTime - windowMs,
-              anchorTime,
-            )
-          ) {
-            continue;
-          }
-          const delta = Math.abs(point.ts - timestamp);
-          if (delta < distance) {
-            nearest = point;
-            distance = delta;
-          }
-          if (point.ts < timestamp && delta > distance) break;
-        }
+        const nearestResult = nearestVisibleChartPoint(
+          item.points,
+          timestamp,
+          anchorTime - windowMs,
+          anchorTime,
+        );
+        const nearest = nearestResult.point;
         const valid =
           nearest &&
-          distance <=
+          nearestResult.distance <=
             Math.max(
               item.intervalMs * 2,
               nearest.bucketMs * 1.2,
@@ -2311,25 +2646,25 @@ function CanvasChart({
           value: valid,
         };
       });
-      const lossRows = events
+      const broadLossTolerance = Math.max(
+        30_000,
+        Math.min(windowMs / 80, 120_000),
+      );
+      const lossRows = nearbyLossEvents(
+        events,
+        timestamp,
+        anchorTime - windowMs,
+        anchorTime,
+        broadLossTolerance,
+      )
         .filter(
           (event) =>
-            isChartDatumInWindow(
-              event.ts,
-              event.bucketMs,
-              anchorTime - windowMs,
-              anchorTime,
-            ) &&
             Math.abs(event.ts - timestamp) <=
             Math.max(
               1000,
               event.bucketMs / 2,
               Math.min(windowMs / 80, 120_000),
             ),
-        )
-        .sort(
-          (left, right) =>
-            Math.abs(left.ts - timestamp) - Math.abs(right.ts - timestamp),
         )
         .map((event) => ({
           id: event.id,
@@ -2443,12 +2778,12 @@ function CanvasChart({
         </>
       )}
       <p className="sr-only">
-        {visiblePoints.length === 0 && visibleEvents.length === 0
+        {visibleSummary.pointCount === 0 && visibleSummary.eventCount === 0
           ? "当前时间范围内暂无采样数据。"
           : "当前时间范围内有 " +
-            visiblePoints.length +
+            visibleSummary.pointCount +
             " 个有效延迟点，" +
-            visibleEvents.length +
+            visibleSummary.eventCount +
             " 个丢失事件。"}
       </p>
     </div>
@@ -2801,6 +3136,8 @@ export default function Home() {
     () => document.visibilityState !== "hidden",
   );
   const serviceInstanceRef = useRef<string | null>(null);
+  const pendingSamplesRef = useRef<Sample[]>([]);
+  const sampleFlushTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -2854,8 +3191,35 @@ export default function Home() {
   const ingestSamples = useCallback((incoming: Sample[]) => {
     if (incoming.length === 0) return;
     setSamplesByTarget((previous) => mergeSamples(previous, incoming));
-    setLastUpdated(Math.max(...incoming.map((sample) => sample.ts), Date.now()));
+    let latest = Date.now();
+    incoming.forEach((sample) => {
+      if (sample.ts > latest) latest = sample.ts;
+    });
+    setLastUpdated(latest);
   }, []);
+
+  const flushPendingSamples = useCallback(() => {
+    if (sampleFlushTimerRef.current !== null) {
+      window.clearTimeout(sampleFlushTimerRef.current);
+      sampleFlushTimerRef.current = null;
+    }
+    const pending = pendingSamplesRef.current;
+    pendingSamplesRef.current = [];
+    ingestSamples(pending);
+  }, [ingestSamples]);
+
+  const enqueueSamples = useCallback(
+    (incoming: Sample[]) => {
+      if (incoming.length === 0) return;
+      incoming.forEach((sample) => pendingSamplesRef.current.push(sample));
+      if (sampleFlushTimerRef.current !== null) return;
+      sampleFlushTimerRef.current = window.setTimeout(
+        flushPendingSamples,
+        SSE_SAMPLE_FLUSH_MS,
+      );
+    },
+    [flushPendingSamples],
+  );
 
   const replaceSnapshotSamples = useCallback(
     (incoming: Sample[], targetIds: string[], snapshotAt: number) => {
@@ -2992,7 +3356,7 @@ export default function Home() {
       const normalized = values
         .map((sample) => normalizeSample(sample))
         .filter((sample): sample is Sample => sample !== null);
-      ingestSamples(normalized);
+      enqueueSamples(normalized);
       setConnection("live");
       setLoadError("");
     };
@@ -3065,6 +3429,7 @@ export default function Home() {
     });
 
     return () => {
+      flushPendingSamples();
       handlers.forEach(({ type, handler }) =>
         source.removeEventListener(type, handler),
       );
@@ -3073,7 +3438,8 @@ export default function Home() {
   }, [
     applySnapshot,
     checkServiceInstance,
-    ingestSamples,
+    enqueueSamples,
+    flushPendingSamples,
     ingestTargets,
     pageVisible,
   ]);
@@ -3131,23 +3497,16 @@ export default function Home() {
 
   const derivedStatsByTarget = useMemo(() => {
     const result: Record<string, TargetStats> = {};
-    const windowStart = chartAnchor - rangeMs;
     displayTargets.forEach((target) => {
-      const windowSamples = (displaySamplesByTarget[target.id] ?? []).filter(
-        (sample) =>
-          sample.bucket_ms === 0 &&
-          sample.ts >= windowStart &&
-          sample.ts <= chartAnchor,
-      );
-      const windowBuckets = (displayChartBucketsByTarget[target.id] ?? []).filter(
-        (bucket) =>
-          bucket.start_ms >= windowStart &&
-          bucket.start_ms + bucket.duration_ms <= chartAnchor,
-      );
-      result[target.id] = deriveStats(
-        windowSamples,
-        windowBuckets,
-        target.kind === "proxy_google",
+      const samples = displaySamplesByTarget[target.id] ?? EMPTY_SAMPLES;
+      const buckets =
+        displayChartBucketsByTarget[target.id] ?? EMPTY_CHART_BUCKETS;
+      result[target.id] = deriveStatsForWindowCached(
+        target,
+        samples,
+        buckets,
+        rangeMs,
+        chartAnchor,
       );
     });
     return result;
@@ -3162,48 +3521,47 @@ export default function Home() {
   const targetStates = useMemo(() => {
     const result: Record<string, TargetState> = {};
     displayTargets.forEach((target) => {
-      const visibleSamples = (displaySamplesByTarget[target.id] ?? []).filter(
-        (sample) => sample.ts <= chartAnchor,
+      const latest = latestSampleAtOrBefore(
+        displaySamplesByTarget[target.id] ?? EMPTY_SAMPLES,
+        chartAnchor,
       );
       result[target.id] = getTargetState(
         target,
-        visibleSamples,
+        latest ? [latest] : EMPTY_SAMPLES,
         chartAnchor,
       );
     });
     return result;
   }, [chartAnchor, displaySamplesByTarget, displayTargets]);
 
-  const latencySeries = useMemo(
-    () => {
-      const chartTargets = selectedTarget ? [selectedTarget] : displayTargets;
-      const chartVisibility = selectedTarget
-        ? { [selectedTarget.id]: true }
-        : visibleTargets;
-      return buildLatencySeries(
-        chartTargets,
-        displaySamplesByTarget,
-        chartVisibility,
+  const chartData = useMemo(() => {
+    const chartTargets = selectedTarget ? [selectedTarget] : displayTargets;
+    const series: ChartSeries[] = [];
+    const events: LossEvent[] = [];
+    chartTargets.forEach((target, colorIndex) => {
+      const visible = selectedTarget !== null || visibleTargets[target.id] !== false;
+      if (!visible) return;
+      const samples = displaySamplesByTarget[target.id] ?? EMPTY_SAMPLES;
+      const entry = buildTargetChartDataCached(
+        target,
+        samples,
+        colorIndex,
         theme,
       );
-    },
-    [displaySamplesByTarget, displayTargets, selectedTarget, theme, visibleTargets],
-  );
-  const lossEvents = useMemo(
-    () => {
-      const chartTargets = selectedTarget ? [selectedTarget] : displayTargets;
-      const chartVisibility = selectedTarget
-        ? { [selectedTarget.id]: true }
-        : visibleTargets;
-      return buildLossEvents(
-        chartTargets,
-        displaySamplesByTarget,
-        chartVisibility,
-        theme,
-      );
-    },
-    [displaySamplesByTarget, displayTargets, selectedTarget, theme, visibleTargets],
-  );
+      series.push(...entry.series);
+      events.push(...entry.events);
+    });
+    events.sort((left, right) => left.ts - right.ts);
+    return { series, events };
+  }, [
+    displaySamplesByTarget,
+    displayTargets,
+    selectedTarget,
+    theme,
+    visibleTargets,
+  ]);
+  const latencySeries = chartData.series;
+  const lossEvents = chartData.events;
 
   const saveTarget = async (values: TargetFormValues) => {
     setSaving(true);
@@ -3346,12 +3704,12 @@ export default function Home() {
     ? (targetStates[selectedTarget.id] ??
       getTargetState(selectedTarget, [], chartAnchor))
     : null;
-  const selectedSamples = selectedTarget
-    ? (displaySamplesByTarget[selectedTarget.id] ?? []).filter(
-        (sample) => sample.ts <= chartAnchor,
+  const selectedLatest = selectedTarget
+    ? latestSampleAtOrBefore(
+        displaySamplesByTarget[selectedTarget.id] ?? EMPTY_SAMPLES,
+        chartAnchor,
       )
-    : [];
-  const selectedLatest = selectedSamples[selectedSamples.length - 1];
+    : undefined;
   const selectedLiveTarget = selectedTarget
     ? (targets.find((target) => target.id === selectedTarget.id) ?? selectedTarget)
     : null;

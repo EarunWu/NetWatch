@@ -247,3 +247,85 @@ test("主题偏好只接受浅色并安全回退到深色", async (context) => {
   });
   assert.equal(saved, "light");
 });
+
+test("十二小时大数据量图表计算不会展开参数且绘制点数受画布约束", async (context) => {
+  const vite = await createServer({
+    appType: "custom",
+    logLevel: "silent",
+    server: { middlewareMode: true },
+  });
+  context.after(() => vite.close());
+
+  const { __testing } = await vite.ssrLoadModule("/app/page.tsx");
+  const start = 1_700_000_000_000;
+  const pointCount = 150_000;
+  const points = Array.from({ length: pointCount }, (_, index) => ({
+    ts: start + index,
+    value: index === 123_456 ? 9_999 : index % 400,
+    bucketMs: 0,
+  }));
+  const end = start + pointCount - 1;
+  const series = [
+    {
+      id: "large-series",
+      name: "大数据量",
+      color: "#fff",
+      intervalMs: 1,
+      points,
+    },
+  ];
+
+  const summary = __testing.summarizeVisibleChartData(
+    series,
+    [],
+    start,
+    end,
+  );
+  const reduced = __testing.downsampleChartPoints(
+    points,
+    start,
+    end,
+    1,
+    800,
+  );
+
+  assert.equal(summary.pointCount, pointCount);
+  assert.equal(summary.maxValue, 9_999);
+  assert.ok(reduced.length <= 800 * 6);
+  assert.ok(reduced.some((point) => point.value === 9_999));
+});
+
+test("批量合并实时样本只替换发生变化的目标", async (context) => {
+  const vite = await createServer({
+    appType: "custom",
+    logLevel: "silent",
+    server: { middlewareMode: true },
+  });
+  context.after(() => vite.close());
+
+  const { __testing } = await vite.ssrLoadModule("/app/page.tsx");
+  const first = { ...sample("success", 10), ts: 1_000 };
+  const untouched = [
+    {
+      ...sample("success", 20),
+      target_id: "target-2",
+      ts: 1_000,
+    },
+  ];
+  const current = { "target-1": [first], "target-2": untouched };
+  const second = { ...sample("success", 11), ts: 2_000 };
+  const third = { ...sample("success", 12), ts: 3_000 };
+
+  const merged = __testing.mergeSamples(current, [
+    third,
+    second,
+    second,
+  ]);
+
+  assert.strictEqual(merged["target-2"], untouched);
+  assert.notStrictEqual(merged["target-1"], current["target-1"]);
+  assert.deepEqual(
+    merged["target-1"].map((item) => item.ts),
+    [1_000, 2_000, 3_000],
+  );
+});

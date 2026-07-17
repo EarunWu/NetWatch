@@ -63,7 +63,7 @@ flowchart LR
 需要提前安装：
 
 - Node.js 22.13 或更高版本；
-- Go 1.22 或更高版本；
+- Go 1.22 或更高版本（正式 sidecar 构建固定使用 Go 1.26.5；本机缺少时由 Go 工具链自动下载）；
 - Rust stable；
 - 当前平台对应的 [Tauri 2 系统依赖](https://v2.tauri.app/start/prerequisites/)。
 
@@ -265,7 +265,7 @@ Pop-Location
 npm run build
 ```
 
-`npm run build` 会依次构建前端、同步 Go 内嵌静态资源、执行 Go 测试、生成当前平台 sidecar，再交给 Tauri 打包。
+`npm run build` 会依次构建前端、同步 Go 内嵌静态资源、执行 Go 测试、生成当前平台 sidecar，再交给 Tauri 打包。正式构建脚本会设置 `GOTOOLCHAIN=go1.26.5` 并输出最终二进制的 Go 版本，避免误用 PATH 中较旧且存在已知漏洞的编译器；首次构建如果本机没有该版本，需要联网下载一次工具链。
 
 Windows 配置在 `src-tauri/target/release/bundle/nsis/` 生成 NSIS 安装包；macOS 配置分别在 `bundle/macos/` 与 `bundle/dmg/` 生成 `.app` 和 `.dmg`。如果仍需要旧版“后台 EXE + 浏览器页面”兼容产物，可以执行：
 

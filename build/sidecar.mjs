@@ -3,6 +3,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
+import { releaseGoEnvironment } from "./go-toolchain.mjs";
+
 const buildDirectory = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(buildDirectory, "..");
 const serviceRoot = join(projectRoot, "service");
@@ -50,7 +52,9 @@ async function run(command, args, cwd = projectRoot, env = process.env) {
   });
 }
 
-await run("go", ["test", "./..."], serviceRoot);
+const goEnvironment = releaseGoEnvironment();
+
+await run("go", ["test", "./..."], serviceRoot, goEnvironment);
 await mkdir(binariesRoot, { recursive: true });
 await rm(executablePath, { force: true });
 
@@ -60,11 +64,12 @@ await run(
   ["build", "-trimpath", `-ldflags=${linkerFlags}`, "-o", executablePath, "."],
   serviceRoot,
   {
-    ...process.env,
+    ...goEnvironment,
     CGO_ENABLED: "0",
     GOOS: platform.goos,
     GOARCH: platform.goarch,
   },
 );
+await run("go", ["version", executablePath], projectRoot, goEnvironment);
 
 console.log(`Tauri sidecar ready: ${executablePath}`);

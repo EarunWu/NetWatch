@@ -3,6 +3,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
+import { releaseGoEnvironment } from "./go-toolchain.mjs";
+
 const buildDirectory = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(buildDirectory, "..");
 const serviceRoot = join(projectRoot, "service");
@@ -11,11 +13,11 @@ const viteCLI = join(projectRoot, "node_modules", "vite", "bin", "vite.js");
 const executableName = process.platform === "win32" ? "NetWatch.Service.exe" : "netwatch-service";
 const executablePath = join(outputRoot, executableName);
 
-async function run(command, args, cwd = projectRoot) {
+async function run(command, args, cwd = projectRoot, env = process.env) {
   await new Promise((resolveRun, rejectRun) => {
     const child = spawn(command, args, {
       cwd,
-      env: process.env,
+      env,
       stdio: "inherit",
       shell: false,
     });
@@ -32,7 +34,9 @@ async function run(command, args, cwd = projectRoot) {
 
 await run(process.execPath, [viteCLI, "build"]);
 await run(process.execPath, [join(buildDirectory, "sync-static.mjs")]);
-await run("go", ["test", "./..."], serviceRoot);
+const goEnvironment = releaseGoEnvironment();
+
+await run("go", ["test", "./..."], serviceRoot, goEnvironment);
 
 await mkdir(outputRoot, { recursive: true });
 await rm(executablePath, { force: true });
@@ -42,6 +46,8 @@ await run(
   "go",
   ["build", "-trimpath", `-ldflags=${linkerFlags}`, "-o", executablePath, "."],
   serviceRoot,
+  goEnvironment,
 );
+await run("go", ["version", executablePath], projectRoot, goEnvironment);
 
 console.log(`Release ready: ${executablePath}`);
